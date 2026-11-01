@@ -2,9 +2,11 @@
 //!
 //! Persists every message seen via polling or group history so chat history accumulates locally.
 
-use anyhow::Result;
+use crate::history_crypto::DataCipher;
+use anyhow::{bail, Result};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 use crate::chat::{ChatMessage, Thread};
 
@@ -30,18 +32,47 @@ pub struct StoredThread {
 }
 
 pub struct MessageStore {
-    pub conn: Connection,
+    conn: Connection,
+    cipher: DataCipher,
 }
 
 impl MessageStore {
     /// Open SQLite database at `path` and initialize table schemas and indices if absent.
     pub fn open(path: &str) -> Result<Self> {
-        let conn = if path == ":memory:" {
-            Connection::open_in_memory()?
-        } else {
-            Connection::open(path)?
-        };
+        let result = Self::open_secure(path);
+        if result.is_err() {
+            crate::logger::report_history_error();
+        }
+        result
+    }
 
+    fn open_secure(path: &str) -> Result<Self> {
+        if path == ":memory:" {
+            return Self::initialize(Connection::open_in_memory()?, DataCipher::random());
+        }
+        let path = Path::new(path);
+        let _migration_lock =
+            crate::secure_session::lock_session_file(&path.with_extension("migration"))?;
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            if !meta.is_file() || meta.file_type().is_symlink() {
+                bail!("Tệp lịch sử không hợp lệ");
+            }
+        }
+        let conn = Connection::open(path)?;
+        let marked: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='history_encryption')",
+            [],
+            |row| row.get(0),
+        )?;
+        let cipher = DataCipher::for_path(path, !marked)?;
+        Self::initialize(conn, cipher)
+    }
+
+    fn initialize(conn: Connection, cipher: DataCipher) -> Result<Self> {
+        conn.busy_timeout(std::time::Duration::from_secs(15))?;
+        conn.execute_batch(
+            "PRAGMA secure_delete=ON; PRAGMA temp_store=MEMORY; PRAGMA journal_mode=DELETE;",
+        )?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS messages (
                 msg_id TEXT PRIMARY KEY,
@@ -63,31 +94,138 @@ impl MessageStore {
             );",
         )?;
 
-        Ok(Self { conn })
+        let store = Self { conn, cipher };
+        store.migrate_history()?;
+        Ok(store)
+    }
+
+    fn crypt_message(&self, mut msg: StoredMessage, encrypt: bool) -> Result<StoredMessage> {
+        let id = msg.msg_id.clone();
+        for (column, value) in [
+            ("sender_id", &mut msg.sender_id),
+            ("sender_name", &mut msg.sender_name),
+            ("text", &mut msg.text),
+            ("msg_type", &mut msg.msg_type),
+            ("raw_json", &mut msg.raw_json),
+        ] {
+            *value = if encrypt {
+                self.cipher.encrypt(column, &id, value)?
+            } else {
+                self.cipher.decrypt(column, &id, value)?
+            };
+        }
+        Ok(msg)
+    }
+
+    fn migrate_history(&self) -> Result<()> {
+        let marked: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='history_encryption')",
+            [],
+            |row| row.get(0),
+        )?;
+        if marked {
+            let (version, check, compacted): (i64, String, bool) = self.conn.query_row(
+                "SELECT version, key_check, compacted FROM history_encryption WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            if version != 1
+                || self.cipher.decrypt("metadata", "key-check", &check)? != "ctdozlite-history-v1"
+            {
+                bail!("Không xác thực được định dạng/khóa lịch sử");
+            }
+            if !compacted {
+                self.finish_migration()?;
+            }
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let mut last_row = i64::MIN;
+        loop {
+            let batch: Vec<(i64, StoredMessage)> = {
+                let mut stmt = tx.prepare("SELECT rowid, msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json FROM messages WHERE rowid > ?1 ORDER BY rowid LIMIT 128")?;
+                let rows = stmt.query_map([last_row], |r| {
+                    Ok((
+                        r.get(0)?,
+                        StoredMessage {
+                            msg_id: r.get(1)?,
+                            thread_id: r.get(2)?,
+                            sender_id: r.get(3).unwrap_or_default(),
+                            sender_name: r.get(4).unwrap_or_default(),
+                            text: r.get(5).unwrap_or_default(),
+                            msg_type: r.get(6).unwrap_or_default(),
+                            ts: r.get(7)?,
+                            is_outgoing: r.get::<_, i64>(8)? != 0,
+                            raw_json: r.get(9).unwrap_or_default(),
+                        },
+                    ))
+                })?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
+            if batch.is_empty() {
+                break;
+            }
+            for (rowid, msg) in batch {
+                last_row = rowid;
+                let m = self.crypt_message(msg, true)?;
+                tx.execute("UPDATE messages SET sender_id=?1, sender_name=?2, text=?3, msg_type=?4, raw_json=?5 WHERE msg_id=?6",
+                    params![m.sender_id,m.sender_name,m.text,m.msg_type,m.raw_json,m.msg_id])?;
+            }
+        }
+        let threads: Vec<(String, String)> = {
+            let mut stmt = tx.prepare("SELECT thread_id, name FROM threads")?;
+            let rows =
+                stmt.query_map([], |row| Ok((row.get(0)?, row.get(1).unwrap_or_default())))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for (id, name) in threads {
+            tx.execute(
+                "UPDATE threads SET name=?1 WHERE thread_id=?2",
+                params![self.cipher.encrypt("thread_name", &id, &name)?, id],
+            )?;
+        }
+        tx.execute_batch("CREATE TABLE history_encryption(id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL, key_check TEXT NOT NULL, compacted INTEGER NOT NULL);")?;
+        tx.execute(
+            "INSERT INTO history_encryption VALUES(1,1,?1,0)",
+            [self
+                .cipher
+                .encrypt("metadata", "key-check", "ctdozlite-history-v1")?],
+        )?;
+        tx.commit()?;
+        self.finish_migration()
+    }
+
+    fn finish_migration(&self) -> Result<()> {
+        // Remove legacy plaintext from free SQLite pages. This cannot erase old SSD blocks/backups.
+        // Persist the completion bit only afterwards, so an interrupted vacuum is retried on open.
+        self.conn
+            .execute_batch("VACUUM; UPDATE history_encryption SET compacted=1 WHERE id=1;")?;
+        Ok(())
     }
 
     /// Insert a message. Returns `true` if a new row was inserted, `false` if already existed.
     pub fn upsert_message(&mut self, msg: &StoredMessage) -> Result<bool> {
+        let encoded = self.crypt_message(msg.clone(), true)?;
         let rows = self.conn.execute(
             "INSERT OR IGNORE INTO messages (msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 msg.msg_id,
                 msg.thread_id,
-                msg.sender_id,
-                msg.sender_name,
-                msg.text,
-                msg.msg_type,
+                encoded.sender_id,
+                encoded.sender_name,
+                encoded.text,
+                encoded.msg_type,
                 msg.ts,
                 if msg.is_outgoing { 1 } else { 0 },
-                msg.raw_json,
+                encoded.raw_json,
             ],
         )?;
         if rows == 0 && !msg.raw_json.is_empty() {
-            let _ = self.conn.execute(
+            self.conn.execute(
                 "UPDATE messages SET raw_json = ?1, msg_type = ?2, text = ?4 WHERE msg_id = ?3",
-                params![msg.raw_json, msg.msg_type, msg.msg_id, msg.text],
-            );
+                params![encoded.raw_json, encoded.msg_type, msg.msg_id, encoded.text],
+            )?;
         }
         Ok(rows > 0)
     }
@@ -95,10 +233,9 @@ impl MessageStore {
     /// Delete a message from local SQLite store when user selects "Xóa chỉ ở phía tôi".
     pub fn delete_message(&mut self, thread_id: &str, msg_id: &str, ts: i64) -> Result<()> {
         if !msg_id.is_empty() {
-            let _ = self.conn.execute(
-                "DELETE FROM messages WHERE msg_id = ?1",
-                params![msg_id],
-            );
+            let _ = self
+                .conn
+                .execute("DELETE FROM messages WHERE msg_id = ?1", params![msg_id]);
         }
         if ts > 0 && !thread_id.is_empty() {
             let _ = self.conn.execute(
@@ -120,7 +257,7 @@ impl MessageStore {
                  last_ts = excluded.last_ts",
             params![
                 t.thread_id,
-                t.name,
+                self.cipher.encrypt("thread_name", &t.thread_id, &t.name)?,
                 if t.is_group { 1 } else { 0 },
                 t.last_ts,
             ],
@@ -155,7 +292,7 @@ impl MessageStore {
 
         let mut list = Vec::new();
         for r in rows {
-            list.push(r?);
+            list.push(self.crypt_message(r?, false)?);
         }
         Ok(list)
     }
@@ -178,29 +315,31 @@ impl MessageStore {
         })?;
         let mut out = Vec::new();
         for r in rows {
-            out.push(r?);
+            let mut thread = r?;
+            thread.name = self
+                .cipher
+                .decrypt("thread_name", &thread.thread_id, &thread.name)?;
+            out.push(thread);
         }
         Ok(out)
     }
 
     /// Hydrate `threads` with persisted threads and message history from SQLite.
     /// Returns the total number of messages loaded into `threads`.
-    pub fn hydrate_threads(&self, threads: &mut Vec<Thread>, limit_per_thread: usize) -> Result<usize> {
-        let _ = self.conn.execute(
-            "DELETE FROM messages WHERE text = 'sendBubbleMessage'",
-            [],
-        );
+    pub fn hydrate_threads(
+        &self,
+        threads: &mut Vec<Thread>,
+        limit_per_thread: usize,
+    ) -> Result<usize> {
         crate::chat::deduplicate_threads(threads, None);
 
-        let stored_threads = self.all_threads().unwrap_or_default();
+        let stored_threads = self.all_threads()?;
         for st in stored_threads {
             if st.thread_id.is_empty() || st.thread_id == "0" {
                 continue;
             }
             if let Some(existing) = threads.iter_mut().find(|t| t.id == st.thread_id) {
-                if crate::chat::is_generic_thread_name(&existing.name)
-                    && !st.name.is_empty()
-                {
+                if crate::chat::is_generic_thread_name(&existing.name) && !st.name.is_empty() {
                     existing.name = st.name;
                 }
                 existing.is_group = existing.is_group || st.is_group;
@@ -273,6 +412,11 @@ impl MessageStore {
             }
             let saved_msgs = self.messages_for(&t.id, limit_per_thread)?;
             for sm in saved_msgs {
+                if sm.text == "sendBubbleMessage" {
+                    self.conn
+                        .execute("DELETE FROM messages WHERE msg_id=?1", [&sm.msg_id])?;
+                    continue;
+                }
                 let time = if sm.ts > 0 {
                     let s = sm.ts / 1000;
                     format!("{:02}:{:02}", (s / 3600) % 24, (s / 60) % 60)
@@ -303,10 +447,7 @@ impl MessageStore {
                             .get("cateId")
                             .or_else(|| val.get("catId"))
                             .and_then(|v| v.as_u64());
-                        sticker_type = val
-                            .get("type")
-                            .and_then(|v| v.as_u64())
-                            .map(|n| n as u32);
+                        sticker_type = val.get("type").and_then(|v| v.as_u64()).map(|n| n as u32);
                         reply_to_id = val
                             .get("reply_to_id")
                             .and_then(|v| v.as_str())
@@ -385,7 +526,10 @@ impl MessageStore {
                     (!existing.id.is_empty() && existing.id == cm.id)
                         || (existing.text == cm.text
                             && existing.is_outgoing == cm.is_outgoing
-                            && (existing.ts == cm.ts || (existing.ts != 0 && cm.ts != 0 && (existing.ts - cm.ts).abs() < 5000)))
+                            && (existing.ts == cm.ts
+                                || (existing.ts != 0
+                                    && cm.ts != 0
+                                    && (existing.ts - cm.ts).abs() < 5000)))
                 }) {
                     if existing.sticker_id.is_none() && cm.sticker_id.is_some() {
                         existing.sticker_id = cm.sticker_id;
@@ -490,7 +634,11 @@ impl From<&ChatMessage> for StoredMessage {
                 format!("msg_{}", m.ts)
             },
             thread_id: String::new(),
-            sender_id: if m.is_outgoing { "0".into() } else { m.sender.clone() },
+            sender_id: if m.is_outgoing {
+                "0".into()
+            } else {
+                m.sender.clone()
+            },
             sender_name: m.sender.clone(),
             text: m.text.clone(),
             msg_type,
@@ -503,6 +651,14 @@ impl From<&ChatMessage> for StoredMessage {
 
 /// Persist threads and their messages to SQLite store, returning the count of newly inserted messages.
 pub fn persist_threads(store: &mut MessageStore, threads: &[Thread]) -> Result<usize> {
+    let result = persist_threads_inner(store, threads);
+    if result.is_err() {
+        crate::logger::report_history_error();
+    }
+    result
+}
+
+fn persist_threads_inner(store: &mut MessageStore, threads: &[Thread]) -> Result<usize> {
     let mut new_count = 0;
     for t in threads {
         let last_ts = t.messages.iter().map(|m| m.ts).max().unwrap_or(0);
@@ -530,14 +686,139 @@ pub fn persist_threads(store: &mut MessageStore, threads: &[Thread]) -> Result<u
 
 /// Convenience helper: open `zalo_history.db` (or `path`) and hydrate `threads` with saved history.
 pub fn load_history_into_threads(path: &str, threads: &mut Vec<Thread>, limit_per_thread: usize) {
-    if let Ok(store) = MessageStore::open(path) {
-        let _ = store.hydrate_threads(threads, limit_per_thread);
+    let result = (|| -> Result<()> {
+        let store = MessageStore::open(path)?;
+        let mut candidate = threads.clone();
+        store.hydrate_threads(&mut candidate, limit_per_thread)?;
+        *threads = candidate;
+        Ok(())
+    })();
+    if result.is_err() {
+        crate::logger::report_history_error();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn legacy_database(path: &std::path::Path) -> Connection {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(r#"CREATE TABLE messages(msg_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, sender_id TEXT, sender_name TEXT, text TEXT, msg_type TEXT, ts INTEGER, is_outgoing INTEGER, raw_json TEXT);
+            CREATE TABLE threads(thread_id TEXT PRIMARY KEY, name TEXT, is_group INTEGER, last_ts INTEGER);
+            INSERT INTO messages VALUES('m1','t1','PRIVATE_ID','PRIVATE_SENDER','Nội dung riêng tư ONE','chat.text',1,0,'{"reply":"PRIVATE_REPLY"}');
+            INSERT INTO messages VALUES('m2','t1','PRIVATE_ID','PRIVATE_SENDER','Nội dung riêng tư TWO','chat.text',2,0,'');
+            INSERT INTO threads VALUES('t1','PRIVATE_THREAD',0,2);"#).unwrap();
+        conn
+    }
+
+    #[test]
+    fn migrates_existing_sqlite_and_removes_plaintext_from_active_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.db");
+        let conn = legacy_database(&path);
+        let mut store = MessageStore::initialize(conn, DataCipher::test_key(42)).unwrap();
+        let before = store.messages_for("t1", 10).unwrap();
+        assert_eq!(before.len(), 2);
+        assert_eq!(before[0].text, "Nội dung riêng tư ONE");
+        assert_eq!(before[0].raw_json, r#"{"reply":"PRIVATE_REPLY"}"#);
+        assert_eq!(store.all_threads().unwrap()[0].name, "PRIVATE_THREAD");
+        let mut changed = before[0].clone();
+        changed.text = "UPDATED_PRIVATE_TEXT".into();
+        changed.raw_json = r#"{"quote":"UPDATED_PRIVATE_QUOTE"}"#.into();
+        assert!(!store.upsert_message(&changed).unwrap());
+        assert_eq!(store.messages_for("t1", 10).unwrap()[0], changed);
+        let ciphertext: String = store
+            .conn
+            .query_row("SELECT text FROM messages WHERE msg_id='m1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(ciphertext.starts_with("ctdoenc:v1:"));
+        drop(store);
+        for file in std::fs::read_dir(dir.path()).unwrap() {
+            let bytes = std::fs::read(file.unwrap().path()).unwrap();
+            for secret in [
+                "PRIVATE_ID",
+                "PRIVATE_SENDER",
+                "PRIVATE_THREAD",
+                "PRIVATE_REPLY",
+                "Nội dung riêng tư",
+                "UPDATED_PRIVATE_TEXT",
+                "UPDATED_PRIVATE_QUOTE",
+            ] {
+                assert!(
+                    !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
+                    "{secret}"
+                );
+            }
+        }
+        let store =
+            MessageStore::initialize(Connection::open(&path).unwrap(), DataCipher::test_key(42))
+                .unwrap();
+        assert_eq!(store.messages_for("t1", 10).unwrap()[0], changed);
+        assert!(MessageStore::initialize(
+            Connection::open(&path).unwrap(),
+            DataCipher::test_key(43)
+        )
+        .is_err());
+        assert_eq!(store.messages_for("t1", 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn failed_migration_rolls_back_and_can_be_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.db");
+        let conn = legacy_database(&path);
+        conn.execute_batch("CREATE TRIGGER fail_migration BEFORE UPDATE OF text ON messages WHEN OLD.msg_id='m2' BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;").unwrap();
+        assert!(MessageStore::initialize(conn, DataCipher::test_key(42)).is_err());
+        let conn = Connection::open(path).unwrap();
+        let text: String = conn
+            .query_row("SELECT text FROM messages WHERE msg_id='m1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(text, "Nội dung riêng tư ONE");
+        let marked: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='history_encryption')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!marked);
+        conn.execute_batch("DROP TRIGGER fail_migration;").unwrap();
+        let store = MessageStore::initialize(conn, DataCipher::test_key(42)).unwrap();
+        assert_eq!(store.messages_for("t1", 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn refuses_tampered_fields_and_retries_interrupted_compaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.db");
+        let store =
+            MessageStore::initialize(legacy_database(&path), DataCipher::test_key(42)).unwrap();
+        store
+            .conn
+            .execute("UPDATE history_encryption SET compacted=0", [])
+            .unwrap();
+        drop(store);
+        let store =
+            MessageStore::initialize(Connection::open(path).unwrap(), DataCipher::test_key(42))
+                .unwrap();
+        let compacted: bool = store
+            .conn
+            .query_row("SELECT compacted FROM history_encryption", [], |r| r.get(0))
+            .unwrap();
+        assert!(compacted);
+        store.conn.execute("UPDATE messages SET text=(SELECT text FROM messages WHERE msg_id='m1') WHERE msg_id='m2'",[]).unwrap();
+        assert!(store.messages_for("t1", 10).is_err());
+        store
+            .conn
+            .execute("UPDATE threads SET name='plaintext injection'", [])
+            .unwrap();
+        assert!(store.all_threads().is_err());
+    }
 
     #[test]
     fn test_insert_twice_returns_false() {

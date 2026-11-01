@@ -6,7 +6,7 @@ Linux builds explicitly use Secret Service with encrypted D-Bus transport; Windo
 
 The application stores its files in the current user's application-data directory. Unix directory/file permissions are restricted. Windows files inherit the user application-data directory ACL; the app does not install a custom Windows ACL. Do not run the app as an administrator/root. File and directory checks reduce accidental symlink writes; they do not isolate the app from an attacker already running as the same OS user.
 
-The vault key does not authenticate the app author and does not stop malware with access to your unlocked OS session. The SQLite message history, thumbnails and JSON thread cache are not encrypted. Full-disk encryption and an isolated OS account remain relevant for those files.
+The vault key does not authenticate the app author and does not stop malware with access to your unlocked OS session. Sensitive SQLite history fields and the complete thread cache are encrypted with independent vault-backed data keys. This is field encryption, not whole-database encryption: IDs, timestamps, group/outgoing flags, row counts and schema remain visible. Thumbnails, stickers and downloaded attachments remain unencrypted. See [history encryption](docs/HISTORY_ENCRYPTION.md). Full-disk encryption and an isolated OS account remain relevant.
 
 Existing plaintext sessions are migrated in place before credentials are restored, provided the vault and atomic replacement both succeed. Legacy files elsewhere are not searched or imported automatically. Old plaintext backups, snapshots and SSD blocks are not securely erased. Copying an encrypted file to another location does not migrate its vault key.
 

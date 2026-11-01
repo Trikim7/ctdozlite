@@ -1161,6 +1161,12 @@ impl eframe::App for ZaloGuiApp {
                     "Không lưu được phiên an toàn. Bạn sẽ cần đăng nhập lại sau khi đóng ứng dụng. Hãy mở khóa kho mật khẩu hệ điều hành.");
             });
         }
+        if self.is_logged_in && crate::logger::history_storage_failed() {
+            egui::TopBottomPanel::top("history_storage_warning").show(ctx, |ui| {
+                ui.colored_label(egui::Color32::YELLOW,
+                    "Không đọc/ghi được một phần lịch sử an toàn. Dữ liệu cũ được giữ lại; hãy kiểm tra kho mật khẩu và dung lượng đĩa, rồi mở lại ứng dụng.");
+            });
+        }
         // Dev Inspector Panel
         if self.dev_mode && self.dev_panel_open {
             egui::TopBottomPanel::bottom("dev_inspector")

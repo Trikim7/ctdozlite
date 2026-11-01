@@ -2,7 +2,7 @@
 
 Bản fork của [ctdoteam1110/ctdozlite](https://github.com/ctdoteam1110/ctdozlite), một Zalo client không chính thức viết bằng Rust với GUI và TUI. Giữ nguyên giấy phép MIT / Apache-2.0 và ghi nhận tác giả gốc.
 
-**Phiên bản mã nguồn của fork: 0.1.0. Chưa phát hành bộ cài của fork.** Các bản EXE/DEB/DMG từ repository gốc không chứa những sửa đổi dưới đây. Không dùng chúng để đánh giá bản fork.
+**Phiên bản mã nguồn của fork: 0.1.1. Chưa phát hành bộ cài của fork.** Các bản EXE/DEB/DMG từ repository gốc không chứa những sửa đổi dưới đây. Không dùng chúng để đánh giá bản fork.
 
 ## Đã cải tiến
 
@@ -11,7 +11,8 @@ Bản fork của [ctdoteam1110/ctdozlite](https://github.com/ctdoteam1110/ctdozl
 - Đặt dữ liệu vào thư mục riêng của người dùng; trên Unix giới hạn thư mục `0700`, tệp phiên `0600`. Ghi phiên và JSON cache bằng thay thế nguyên tử; có khóa tệp để điều phối nhiều tiến trình.
 - Tắt log tín hiệu cuộc gọi, log VoIP và nội dung request/response mặc định, kể cả khi chỉ bật `--dev`. Không để lộ tiền tố cookie hoặc khóa trong hàm che bí mật.
 - Chỉ gửi các request xác thực và tải tệp qua HTTPS tới `zalo.me`, `zaloapp.com` hoặc tên miền con đúng ranh giới; WebSocket phải dùng WSS. Chặn userinfo, cổng khác 443 và redirect của HTTP client có cookie.
-- Không nạp lịch sử vào GUI khi chưa khôi phục được phiên cục bộ. Cơ sở dữ liệu lịch sử **chưa được mã hóa**; thư mục riêng không thay thế mã hóa toàn đĩa hoặc bảo vệ tài khoản hệ điều hành.
+- Mã hóa AES-256-GCM các trường nhạy cảm trong SQLite (tin nhắn, người gửi, tên hội thoại, dữ liệu trích dẫn/liên kết) và toàn bộ cache hội thoại. Khóa lịch sử tách khỏi khóa phiên, lưu trong kho khóa hệ điều hành. Mỗi trường gắn với ID và tên cột để phát hiện việc tráo dữ liệu.
+- Tự chuyển lịch sử cũ trong giao dịch SQLite, dọn trang trống sau chuyển đổi và giữ nguyên dữ liệu khi chuyển lỗi. Không ghi đè lịch sử không giải mã được. ID, thời gian, số lượng và cấu trúc SQLite vẫn nhìn thấy; ảnh, sticker và tệp đính kèm chưa mã hóa. Xem [thiết kế mã hóa lịch sử](docs/HISTORY_ENCRYPTION.md).
 - Đồng bộ phiên bản gói, ghim GitHub Actions theo commit và tạo chứng thực nguồn build cho các bản phát hành tương lai.
 
 ## Build

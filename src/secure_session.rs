@@ -124,7 +124,7 @@ fn unseal(bytes: &[u8], vault: &impl KeyStore) -> Result<Zeroizing<Vec<u8>>> {
 }
 
 // A second process must not overwrite a just-created vault key before the first commits its file.
-fn lock_session_file(path: &Path) -> Result<std::fs::File> {
+pub(crate) fn lock_session_file(path: &Path) -> Result<std::fs::File> {
     use fs2::FileExt;
     let mut name = path
         .file_name()
@@ -147,6 +147,35 @@ fn lock_session_file(path: &Path) -> Result<std::fs::File> {
     let file = options.open(lock_path)?;
     file.lock_exclusive()?;
     Ok(file)
+}
+
+/// Independent data keys share the platform vault implementation, not the session encryption key.
+pub(crate) fn data_key(path: &Path, create: bool) -> Result<Zeroizing<Vec<u8>>> {
+    let _lock = SAVE_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Khóa kho dữ liệu bị lỗi"))?;
+    let _file_lock = lock_session_file(path)?;
+    let vault = Vault::for_path(path)?;
+    let key = match vault.read()? {
+        Some(key) => key,
+        None if create => {
+            let key = Zeroizing::new(Aes256Gcm::generate_key(&mut OsRng).to_vec());
+            vault.write(&key)?;
+            key
+        }
+        None => bail!("Không có khóa giải mã lịch sử; không tạo khóa thay thế"),
+    };
+    if key.len() != 32 {
+        bail!("Khóa dữ liệu không hợp lệ");
+    }
+    Ok(key)
+}
+
+#[cfg(test)]
+pub(crate) fn delete_test_data_key(path: &Path) {
+    if let Ok(vault) = Vault::for_path(path) {
+        let _ = vault.0.delete_credential();
+    }
 }
 
 pub fn save(path: &Path, session: &crate::session::SavedSession) -> Result<()> {

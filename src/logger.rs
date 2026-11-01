@@ -64,6 +64,16 @@ pub fn init(dev_mode: bool) {
 
 /// Raw diagnostic payloads can include credentials, message content and call keys.
 /// Developer UI alone never opts into recording those values.
+static HISTORY_STORAGE_FAILED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+/// Sticky until restart: a later successful cache write must not hide a database failure.
+pub fn report_history_error() {
+    HISTORY_STORAGE_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+pub fn history_storage_failed() -> bool {
+    HISTORY_STORAGE_FAILED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 static SESSION_STORAGE_FAILED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -251,7 +261,8 @@ pub fn scan_logs() -> Vec<ScanFinding> {
                 "Đã quét {} requests, toàn bộ phản hồi mã thành công (200 OK / error_code 0).",
                 entries.len()
             ),
-            suggestion: "Kết quả này chỉ phản ánh mã phản hồi, không phải kiểm tra an toàn dữ liệu.".into(),
+            suggestion:
+                "Kết quả này chỉ phản ánh mã phản hồi, không phải kiểm tra an toàn dữ liệu.".into(),
         });
     }
 

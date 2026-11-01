@@ -329,19 +329,16 @@ pub fn deduplicate_threads(
 
 /// Load locally cached conversations and message history.
 pub fn load_threads_cache() -> Vec<Thread> {
-    if let Ok(text) = std::fs::read_to_string("threads_cache.json") {
-        if let Ok(mut threads) = serde_json::from_str::<Vec<Thread>>(&text) {
-            deduplicate_threads(&mut threads, None);
-            return threads;
-        }
+    match crate::history_crypto::load_cache(std::path::Path::new("threads_cache.json")) {
+        Ok(mut threads) => { deduplicate_threads(&mut threads, None); threads }
+        Err(_) => { crate::logger::report_history_error(); Vec::new() }
     }
-    Vec::new()
 }
 
-/// Persist conversations and message history locally so they survive app restarts.
+/// Encrypt the complete cache, including names, previews, replies and link metadata.
 pub fn save_threads_cache(threads: &[Thread]) {
-    if let Ok(text) = serde_json::to_string_pretty(threads) {
-        let _ = crate::storage::atomic_write(std::path::Path::new("threads_cache.json"), text.as_bytes());
+    if crate::history_crypto::save_cache(std::path::Path::new("threads_cache.json"), threads).is_err() {
+        crate::logger::report_history_error();
     }
 }
 

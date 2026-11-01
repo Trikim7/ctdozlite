@@ -18,6 +18,7 @@ mod qr;
 mod session;
 mod secure_session;
 mod storage;
+mod history_crypto;
 mod socket;
 mod store;
 mod tui;

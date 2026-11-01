@@ -1,7 +1,7 @@
 # Security hardening — 2026-11-01
 
 Base: upstream commit `73849bde5e5ffff21537e92886891db510e9c857` (upstream tag v0.0.2).
-Fork source version: **0.1.0**. The old upstream executable was reviewed separately and is not a build of this fork.
+Fork source version: **0.1.1**. The old upstream executable was reviewed separately and is not a build of this fork.
 
 ## Threats addressed
 
@@ -31,4 +31,4 @@ Advisory sources: [Tokio](https://rustsec.org/advisories/RUSTSEC-2026-0384.html)
 
 The local test suite and Clippy are run on Linux. Pre-existing Clippy warnings remain; this work does not claim a warning-free repository. The optional native vault test uses a temporary credential entry and cleans it up. Tests do not exercise Zalo authentication or access real chat content.
 
-SQLite history and thread/media caches are still unencrypted. Windows ACL enforcement relies on the user's application-data directory; a Windows/macOS runtime test is still needed. Moving the encrypted session changes its vault lookup identity. No real login, messaging, call, camera/microphone, account-revocation or end-to-end installer tests have been performed. Treat this as a security improvement suitable for further testing, not a production security certification.
+As of 0.1.1, sensitive SQLite fields and the full conversation cache are encrypted; IDs, timestamps, flags, schema and media files are not. See [HISTORY_ENCRYPTION.md](HISTORY_ENCRYPTION.md) for migration and limits. Windows ACL enforcement relies on the user's application-data directory; a Windows/macOS runtime test is still needed. Moving the encrypted session changes its vault lookup identity. No real login, messaging, call, camera/microphone, account-revocation or end-to-end installer tests have been performed. Treat this as a security improvement suitable for further testing, not a production security certification.

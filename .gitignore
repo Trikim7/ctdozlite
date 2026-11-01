@@ -46,3 +46,9 @@ Thumbs.db
 
 # Synchronization file for encrypted sessions (contains no credentials)
 session*.json.lock
+
+# History encryption coordination files (no credentials)
+*.cache-io.lock
+*.migration.lock
+*.db.lock
+threads_cache.json.lock
