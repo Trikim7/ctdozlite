@@ -47,14 +47,18 @@ pub fn prompt_password(label: &str) -> Result<String> {
     Ok(s.trim_end_matches(['\r', '\n']).to_string())
 }
 
+/// Zalo timestamps are UTC Unix values; UI consistently uses Vietnam (UTC+7).
+pub fn timestamp_ms(ts: i64) -> i64 {
+    if ts > 0 && ts < 10_000_000_000 { ts.saturating_mul(1000) } else { ts }
+}
+pub fn time_hm(ts: i64) -> String {
+    if ts <= 0 { return String::new(); }
+    let sec = (timestamp_ms(ts) / 1000 + 7 * 3600).rem_euclid(86400);
+    format!("{:02}:{:02}", sec / 3600, sec % 3600 / 60)
+}
 pub fn clock() -> String {
-    let secs = crate::login::unix_now();
-    format!(
-        "{:02}:{:02}:{:02}",
-        (secs / 3600) % 24,
-        (secs / 60) % 60,
-        secs % 60
-    )
+    let secs = (crate::login::unix_now() as i64 + 7 * 3600).rem_euclid(86400);
+    format!("{:02}:{:02}:{:02}", secs / 3600, secs % 3600 / 60, secs % 60)
 }
 
 /// Repaint the thread list and wait for one key.
@@ -115,4 +119,15 @@ fn fit(s: &str, w: usize) -> String {
     let pad = w.saturating_sub(out.chars().count());
     out.extend(std::iter::repeat_n(' ', pad));
     out
+}
+
+#[cfg(test)]
+mod timezone_tests {
+    #[test]
+    fn vietnam_time_accepts_seconds_and_milliseconds_and_rolls_midnight() {
+        assert_eq!(super::time_hm(1_700_000_000), "05:13");
+        assert_eq!(super::time_hm(1_700_000_000_000), "05:13");
+        assert_eq!(super::time_hm(1_700_006_400_000), "07:00");
+        assert_eq!(super::time_hm(0), "");
+    }
 }

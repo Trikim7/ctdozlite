@@ -19,6 +19,8 @@ mod session;
 mod secure_session;
 mod storage;
 mod history_crypto;
+mod input_method;
+mod sync_history;
 mod socket;
 mod store;
 mod tui;

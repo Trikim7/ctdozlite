@@ -2992,8 +2992,8 @@ impl ZaloGuiApp {
                                             self.composer_sticker_selected = None;
                                         }
 
-                                        let enter_pressed =
-                                            (response.lost_focus() || response.has_focus())
+                                        let enter_pressed = self.ime_state.may_submit_enter()
+                                            && (response.lost_focus() || response.has_focus())
                                                 && ui.input(|i| i.key_pressed(Key::Enter));
                                         if enter_pressed {
                                             if let Some(sel) = self.composer_sticker_selected {

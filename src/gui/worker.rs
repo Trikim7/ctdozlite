@@ -7,6 +7,7 @@ pub enum WorkerCmd {
         pass: String,
     },
     RefreshThreads,
+    SyncHistory,
     PollMessages {
         known_threads: Vec<(String, String, bool)>,
     },
@@ -398,9 +399,40 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                 }
 
                 let mut current_qr_task: Option<tokio::task::JoinHandle<()>> = None;
+                let mut history_task: Option<tokio::task::JoinHandle<()>> = None;
 
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        WorkerCmd::SyncHistory => {
+                            if let Some(task)=history_task.take() {task.abort();}
+                            let shared=session.clone(); let tx=gui_tx.clone(); let ctx=egui_ctx.clone();
+                            history_task=Some(tokio::spawn(async move {
+                                let s=shared.lock().await.clone();
+                                let Some(owner)=s.login.as_ref().map(|l|l.uin.clone()) else {return;};
+                                let _=tx.send(GuiEvent::HistoryStatus("Đang tải lịch sử có trên máy chủ Zalo…".into()));ctx.request_repaint();
+                                let Ok(mut threads)=crate::chat::get_friends(&s).await else {
+                                    let _=tx.send(GuiEvent::HistoryStatus("Chưa tải được danh sách hội thoại; mở lại ứng dụng để thử lại.".into()));return;
+                                };
+                                if let Ok(previews)=crate::chat::get_last_msgs(&s,&[]).await {crate::chat::merge_previews(&mut threads,&previews);}
+                                let _=tx.send(GuiEvent::HistoryUpdated(threads.clone()));ctx.request_repaint();
+                                let cloud=s.login.as_ref().map(|l|l.send2me_id.as_str()).unwrap_or("");
+                                let ids:Vec<String>=threads.iter().filter(|t|t.is_group||t.id==cloud).map(|t|t.id.clone()).collect();
+                                let mut added=0usize;let mut failed=0usize;
+                                for (index,id) in ids.iter().enumerate() {
+                                    if shared.lock().await.login.as_ref().map(|l|l.uin.as_str())!=Some(owner.as_str()) {return;}
+                                    let Some(thread)=threads.iter_mut().find(|t|t.id==*id) else {continue;};
+                                    let _=tx.send(GuiEvent::HistoryStatus(format!("Đang tải lịch sử máy chủ: {}/{} hội thoại",index+1,ids.len())));ctx.request_repaint();
+                                    match crate::sync_history::backfill_thread(&s,thread).await {
+                                        Ok(n)=>added+=n,Err(_)=>failed+=1,
+                                    }
+                                    if shared.lock().await.login.as_ref().map(|l|l.uin.as_str())!=Some(owner.as_str()) {return;}
+                                    if let Ok(mut store)=crate::store::MessageStore::open("zalo_history.db") {let _=crate::store::persist_threads(&mut store,std::slice::from_ref(thread));}
+                                    let _=tx.send(GuiEvent::HistoryUpdated(vec![thread.clone()]));ctx.request_repaint();
+                                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                                }
+                                let _=tx.send(GuiEvent::HistoryStatus(format!("Đã tải {added} tin nhắn lịch sử có trên máy chủ; {failed} hội thoại chưa tải được. Đồng bộ trực tiếp từ điện thoại chưa được hỗ trợ.")));ctx.request_repaint();
+                            }));
+                        }
                         WorkerCmd::PersistThreads(threads_snapshot) => {
                             tokio::task::spawn_blocking(move || {
                                 if let Ok(mut store) =
@@ -413,6 +445,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                             });
                         }
                         WorkerCmd::Logout => {
+                            if let Some(task)=history_task.take() {task.abort();}
                             if let Some(task) = current_qr_task.take() {
                                 task.abort();
                             }
@@ -431,6 +464,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                             egui_ctx.request_repaint();
                         }
                         WorkerCmd::RequestQr => {
+                            if let Some(task)=history_task.take() {task.abort();}
                             if let Some(task) = current_qr_task.take() {
                                 task.abort();
                             }

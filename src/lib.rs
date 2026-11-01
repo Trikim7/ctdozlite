@@ -13,6 +13,8 @@ pub mod session;
 pub mod secure_session;
 pub mod storage;
 pub mod history_crypto;
+pub mod input_method;
+pub mod sync_history;
 pub mod socket;
 pub mod store;
 pub mod tui;

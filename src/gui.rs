@@ -51,6 +51,8 @@ pub enum GuiEvent {
     },
     LoginFailed(String),
     ThreadsUpdated(Vec<Thread>),
+    HistoryUpdated(Vec<Thread>),
+    HistoryStatus(String),
     MessageSent {
         thread_id: String,
         text: String,
@@ -306,6 +308,9 @@ pub struct ZaloGuiApp {
     thread_filter: ThreadFilter,
     search_query: String,
     input_message: String,
+    ime_state: crate::input_method::ImeState,
+    history_sync_started: bool,
+    history_status: String,
     status_msg: String,
 
     // Reply / forward state
@@ -489,6 +494,9 @@ impl ZaloGuiApp {
             thread_filter: ThreadFilter::All,
             search_query: String::new(),
             input_message: String::new(),
+            ime_state: crate::input_method::ImeState::default(),
+            history_sync_started: false,
+            history_status: String::new(),
             replying_to: None,
             forward_msg: None,
             forward_filter: String::new(),
@@ -604,6 +612,7 @@ impl ZaloGuiApp {
                         format!("Đã quét bởi {name} — Vui lòng bấm 'Đăng nhập' trên điện thoại…");
                 }
                 GuiEvent::LoginSuccess { name, uin, avatar } => {
+                    self.history_sync_started=false;
                     self.is_logged_in = true;
                     self.user_name = name;
                     self.user_uin = uin;
@@ -618,8 +627,27 @@ impl ZaloGuiApp {
                     self.login_in_progress = false;
                     self.login_status_msg = format!("Lỗi đăng nhập: {err}");
                 }
+                GuiEvent::HistoryStatus(status) => { self.history_status=status; }
+                GuiEvent::HistoryUpdated(updates) => {
+                    let selected=self.threads.get(self.selected_thread_index).map(|t|t.id.clone());
+                    for incoming in updates {
+                        if let Some(existing)=self.threads.iter_mut().find(|t|t.id==incoming.id) {
+                            crate::chat::merge_thread_into(existing,incoming,true);
+                        } else { self.threads.push(incoming); }
+                    }
+                    crate::chat::normalize_thread_times(&mut self.threads);
+                    crate::chat::deduplicate_threads(&mut self.threads,None);
+                    if let Some(id)=selected {
+                        if let Some(index)=self.threads.iter().position(|t|t.id==id) {self.selected_thread_index=index;}
+                    }
+                    // Backfilled messages are old: do not increment unread badges or play notifications.
+                }
                 GuiEvent::ThreadsUpdated(updates) => {
                     if self.is_logged_in && !updates.is_empty() {
+                        if !self.history_sync_started {
+                            self.history_sync_started=true;
+                            if let Some(tx)=WORKER_TX.get() {let _=tx.send(WorkerCmd::SyncHistory);}
+                        }
                         let prev_selected_name = self
                             .threads
                             .get(self.selected_thread_index)
@@ -1132,6 +1160,7 @@ impl eframe::App for ZaloGuiApp {
             self.theme_dirty = false;
         }
 
+        ctx.input(|i| self.ime_state.update(&i.events));
         self.check_events(ctx);
 
         // Non-overlapping long-poll trigger; wakes only every 1.2s to keep idle CPU ~0%
@@ -1166,6 +1195,9 @@ impl eframe::App for ZaloGuiApp {
                 ui.colored_label(egui::Color32::YELLOW,
                     "Không đọc/ghi được một phần lịch sử an toàn. Dữ liệu cũ được giữ lại; hãy kiểm tra kho mật khẩu và dung lượng đĩa, rồi mở lại ứng dụng.");
             });
+        }
+        if self.is_logged_in && !self.history_status.is_empty() {
+            egui::TopBottomPanel::top("history_progress").show(ctx, |ui| {ui.label(&self.history_status);});
         }
         // Dev Inspector Panel
         if self.dev_mode && self.dev_panel_open {

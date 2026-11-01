@@ -93,3 +93,7 @@ assets = [
     ["src/assets/app_icon.png", "usr/share/icons/hicolor/256x256/apps/ctdozlite.png", "644"],
     ["README.md", "usr/share/doc/ctdozlite/README.md", "644"],
 ]
+
+[patch.crates-io]
+# Backport upstream Linux IME fix without changing the app-wide GUI API.
+egui-winit = { path = "vendor/egui-winit" }

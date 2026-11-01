@@ -89,7 +89,10 @@ pub fn is_generic_thread_name(name: &str) -> bool {
     let t = name.trim();
     t.is_empty()
         || t.starts_with("Người dùng ")
-        || t.starts_with("Nhóm ")
+        || t.strip_prefix("Nhóm ").is_some_and(|id| {
+            let id=id.trim_start_matches("group_").trim_start_matches('g');
+            !id.is_empty() && id.chars().all(|c|c.is_ascii_digit())
+        })
         || t.chars().all(|c| c.is_ascii_digit())
 }
 
@@ -330,8 +333,22 @@ pub fn deduplicate_threads(
 /// Load locally cached conversations and message history.
 pub fn load_threads_cache() -> Vec<Thread> {
     match crate::history_crypto::load_cache(std::path::Path::new("threads_cache.json")) {
-        Ok(mut threads) => { deduplicate_threads(&mut threads, None); threads }
+        Ok(mut threads) => {
+            normalize_thread_times(&mut threads);
+            deduplicate_threads(&mut threads, None); threads
+        }
         Err(_) => { crate::logger::report_history_error(); Vec::new() }
+    }
+}
+
+pub fn normalize_thread_times(threads: &mut [Thread]) {
+    for thread in threads {
+        for msg in &mut thread.messages {
+            if msg.ts > 0 { msg.ts = crate::ui::timestamp_ms(msg.ts); msg.time = crate::ui::time_hm(msg.ts); }
+        }
+        if let Some(latest) = thread.messages.iter().filter(|m| m.ts > 0).max_by_key(|m| m.ts) {
+            thread.time = latest.time.clone();
+        }
     }
 }
 
@@ -459,10 +476,7 @@ fn parse_thread(v: &Value) -> Option<Thread> {
             Value::String(s) => s.parse::<i64>().ok(),
             _ => None,
         })
-        .map(|ts| {
-            let s = ts / 1000;
-            format!("{:02}:{:02}", (s / 3600) % 24, (s / 60) % 60)
-        })
+        .map(crate::ui::time_hm)
         .unwrap_or_default();
 
     Some(Thread {
@@ -2592,59 +2606,50 @@ pub async fn get_group_history_raw(s: &Session, grid: &str, count: u32) -> Resul
     Ok(resp)
 }
 
-/// `GET /api/group/getlg/v4` (cmd 12027) — list of all groups user belongs to.
-pub async fn get_groups(s: &Session) -> Result<Vec<Thread>> {
-    if s.login.is_none() {
-        return Ok(Vec::new());
-    }
-    let url = format!("{}/api/group/getlg/v4?{}", s.domains.group, s.common_params());
-    let resp = s.get(&url).await?;
-    let resp = s.maybe_decrypt(resp, s.session_key_bytes()).await;
+/// Force a complete profile response: current server versions can yield only "unchanged" IDs.
+pub fn group_profile_params(ids: &[String]) -> Value {
+    let versions: serde_json::Map<String, Value> = ids.iter().map(|id|(id.clone(),json!(0))).collect();
+    json!({"gridVerMap": serde_json::to_string(&versions).unwrap_or_default()})
+}
 
-    let mut groups = Vec::new();
-    if let Some(data) = resp.get("data") {
-        if let Some(map) = data.get("gridVerMap").and_then(Value::as_object) {
-            for (grid, _ver) in map {
-                groups.push(Thread {
-                    id: grid.clone(),
-                    name: format!("Nhóm {}", grid),
-                    preview: String::new(),
-                    time: crate::ui::clock(),
-                    avatar: None,
-                    is_group: true,
-                    messages: Vec::new(),
-                });
-            }
-            if !groups.is_empty() {
-                if let Ok(gv_str) = serde_json::to_string(map) {
-                    let body = obj(&[("gridVerMap", json!(gv_str))]);
-                    if let Ok(params) = s.encoded_params(&body) {
-                        let mg_url = format!("{}/api/group/getmg-v2?{}", s.domains.group, s.common_params());
-                        if let Ok(mg_resp) = s.post_form(&mg_url, format!("params={params}")).await {
-                            let mg_dec = s.maybe_decrypt(mg_resp, s.session_key_bytes()).await;
-                            if let Some(info_map) = mg_dec.pointer("/data/gridInfoMap").and_then(Value::as_object) {
-                                for g in &mut groups {
-                                    if let Some(info) = info_map.get(&g.id) {
-                                        if let Some(name) = pick_str(info, &["name", "groupName", "displayName"]) {
-                                            g.name = name;
-                                        }
-                                        if let Some(avt) = pick_str(info, &["avt", "fullAvt", "avatar"]) {
-                                            g.avatar = Some(avt);
-                                        }
-                                    }
-                                }
-                            }
-                            if let Some(removed) = mg_dec.pointer("/data/removedsGroup").and_then(Value::as_array) {
-                                let rem_ids: std::collections::HashSet<&str> =
-                                    removed.iter().filter_map(Value::as_str).collect();
-                                groups.retain(|g| !rem_ids.contains(g.id.as_str()));
-                            }
-                        }
-                    }
+pub fn response_payload(resp: &Value) -> Value {
+    let mut data = resp.get("data").unwrap_or(resp).clone();
+    if let Some(text) = data.as_str() {
+        if let Ok(parsed) = serde_json::from_str::<Value>(text) { data = parsed; }
+    }
+    data
+}
+
+/// Fetch group membership first, then complete metadata in bounded batches.
+pub async fn get_groups(s: &Session) -> Result<Vec<Thread>> {
+    if s.login.is_none() { return Ok(Vec::new()); }
+    let resp = s.get(&format!("{}/api/group/getlg/v4?{}",s.domains.group,s.common_params())).await?;
+    let decoded = s.maybe_decrypt(resp,s.session_key_bytes()).await;
+    let data = response_payload(&decoded);
+    let mut groups: Vec<Thread> = data.get("gridVerMap").and_then(Value::as_object)
+        .map(|m|m.keys().map(|id|Thread { id:id.clone(),name:format!("Nhóm {id}"),
+            preview:String::new(),time:String::new(),avatar:None,is_group:true,messages:Vec::new() }).collect()).unwrap_or_default();
+    let ids: Vec<String> = groups.iter().map(|g|g.id.clone()).collect();
+    let mut removed = std::collections::HashSet::new();
+    // Larger requests can silently omit group profiles on the live service.
+    for chunk in ids.chunks(25) {
+        let params=s.encoded_params(&group_profile_params(chunk))?;
+        let response=s.post_form(&format!("{}/api/group/getmg-v2?{}",s.domains.group,s.common_params()),format!("params={params}")).await?;
+        let decoded=s.maybe_decrypt(response,s.session_key_bytes()).await;
+        let info=response_payload(&decoded);
+        if let Some(profiles)=info.get("gridInfoMap").and_then(Value::as_object) {
+            for g in groups.iter_mut() {
+                if let Some(profile)=profiles.get(&g.id) {
+                    if let Some(name)=pick_str(profile,&["name","groupName","displayName"]).filter(|n|!n.trim().is_empty()) {g.name=name;}
+                    g.avatar=pick_str(profile,&["fullAvt","avt","avatar"]).filter(|a|!a.is_empty()).or_else(||g.avatar.clone());
                 }
             }
         }
+        if let Some(ids)=info.get("removedsGroup").and_then(Value::as_array) {
+            removed.extend(ids.iter().filter_map(Value::as_str).map(str::to_owned));
+        }
     }
+    groups.retain(|g|!removed.contains(&g.id));
     Ok(groups)
 }
 
@@ -2672,6 +2677,16 @@ pub async fn get_mini_profiles(s: &Session, user_ids: &[String]) -> Result<serde
 
 /// Automatically resolve real display names and avatars for threads that only have placeholder names.
 pub async fn resolve_thread_names(s: &Session, threads: &mut [Thread]) {
+    if threads.iter().any(|t| t.is_group && is_generic_thread_name(&t.name)) {
+        if let Ok(groups) = get_groups(s).await {
+            for thread in threads.iter_mut().filter(|t| t.is_group) {
+                if let Some(group) = groups.iter().find(|g| g.id == thread.id) {
+                    if !is_generic_thread_name(&group.name) { thread.name = group.name.clone(); }
+                    if group.avatar.is_some() { thread.avatar = group.avatar.clone(); }
+                }
+            }
+        }
+    }
     let unknown_ids: Vec<String> = threads
         .iter()
         .filter(|t| {
@@ -3357,8 +3372,7 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         .unwrap_or(0);
 
     let time = if ts > 0 {
-        let s = ts / 1000;
-        format!("{:02}:{:02}", (s / 3600) % 24, (s / 60) % 60)
+        crate::ui::time_hm(ts)
     } else {
         crate::ui::clock()
     };
@@ -4072,6 +4086,15 @@ mod tests {
             is_group: false,
             messages: Vec::new(),
         }
+    }
+
+    #[test]
+    fn real_group_names_are_not_overwritten_by_placeholders() {
+        assert!(is_generic_thread_name("Nhóm 123456"));
+        assert!(!is_generic_thread_name("Nhóm học tập"));
+        let params=group_profile_params(&["123".into(),"456".into()]);
+        let map:serde_json::Value=serde_json::from_str(params["gridVerMap"].as_str().unwrap()).unwrap();
+        assert_eq!(map["123"],0);assert_eq!(map["456"],0);
     }
 
     #[test]

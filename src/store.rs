@@ -418,8 +418,7 @@ impl MessageStore {
                     continue;
                 }
                 let time = if sm.ts > 0 {
-                    let s = sm.ts / 1000;
-                    format!("{:02}:{:02}", (s / 3600) % 24, (s / 60) % 60)
+                    crate::ui::time_hm(sm.ts)
                 } else {
                     crate::ui::clock()
                 };
