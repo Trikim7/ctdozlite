@@ -214,6 +214,10 @@ pub fn merge_thread_into(
                 existing_msg.reply_to_sender = msg.reply_to_sender;
                 existing_msg.reply_to_text = msg.reply_to_text;
             }
+            if matches!(msg.link_src.as_deref(),Some("Hình ảnh Zalo"|"Video Zalo")) {
+                existing_msg.link_url=msg.link_url.clone();existing_msg.link_thumb=msg.link_thumb.clone();existing_msg.link_src=msg.link_src.clone();existing_msg.link_title=msg.link_title.clone();existing_msg.link_desc=msg.link_desc.clone();
+                if existing_msg.text.starts_with("http") {existing_msg.text=msg.text.clone();}
+            }
             if existing_msg.link_url.is_none() && msg.link_url.is_some() {
                 existing_msg.link_url = msg.link_url;
                 existing_msg.link_title = msg.link_title;
@@ -3067,9 +3071,8 @@ fn extract_content_text(v: &Value) -> Option<String> {
             Some(s.clone())
         }
         Value::Object(o) => {
-            let href = o
-                .get("href")
-                .and_then(Value::as_str)
+            let href = ["href", "url", "hd", "originalUrl", "normalUrl", "fileUrl", "videoUrl", "playUrl"]
+                .iter().find_map(|key|o.get(*key).and_then(Value::as_str))
                 .map(str::trim)
                 .filter(|h| !h.is_empty() && (h.starts_with("http://") || h.starts_with("https://")));
             for k in ["description", "caption", "text", "msg", "title"] {
@@ -3183,9 +3186,8 @@ fn extract_link_info(
             (None, None, None, None, None)
         }
         Value::Object(o) => {
-            let href = o
-                .get("href")
-                .and_then(Value::as_str)
+            let href = ["href", "url", "hd", "originalUrl", "normalUrl", "fileUrl", "videoUrl", "playUrl"]
+                .iter().find_map(|key|o.get(*key).and_then(Value::as_str))
                 .map(str::trim)
                 .filter(|h| !h.is_empty() && (h.starts_with("http://") || h.starts_with("https://")))
                 .map(str::to_string);
@@ -3194,6 +3196,8 @@ fn extract_link_info(
             };
             let thumb = o
                 .get("thumb")
+                .or_else(|| o.get("thumbnail"))
+                .or_else(|| o.get("thumbUrl"))
                 .or_else(|| o.get("hd"))
                 .and_then(Value::as_str)
                 .map(str::trim)
@@ -3244,7 +3248,7 @@ fn extract_link_info(
         _ => (None, None, None, None, None),
     }
 }
-fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
+pub(crate) fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     let msg_type = normalize_msg_type(it);
 
     let raw_content_val = it
@@ -3256,13 +3260,40 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     if sticker_meta.is_none() && (msg_type == "chat.sticker" || msg_type == "sticker" || msg_type == "5") {
         sticker_meta = extract_sticker_info(it);
     }
-    let (link_url, link_title, link_desc, link_thumb, link_src) = raw_content_val
+    let (mut link_url, mut link_title, link_desc, mut link_thumb, mut link_src) = raw_content_val
         .map(extract_link_info)
         .unwrap_or((None, None, None, None, None));
+
+    // Media type comes from the wire type, not the caption or hostname.
+    let media_label=match msg_type.as_str() {
+        "chat.photo"|"photo"|"2"=>Some(("Hình ảnh Zalo","[Hình ảnh]")),
+        "chat.video"|"video"|"4"=>Some(("Video Zalo","[Video]")),
+        "chat.file"|"file"|"19"=>Some(("Tập tin Zalo","[Tập tin]")),
+        _=>None,
+    };
+    if let Some((source,title))=media_label {
+        link_src=Some(source.into());
+        if link_title.is_none() {link_title=Some(title.into());}
+        if let Some(value)=raw_content_val {
+            let object=if let Some(raw)=value.as_str() {serde_json::from_str::<Value>(raw).ok()} else {Some(value.clone())};
+            if let Some(object)=object {
+                if source=="Hình ảnh Zalo" {
+                    if let Some(hd)=object.get("hd").and_then(Value::as_str).filter(|s|s.starts_with("https://")||s.starts_with("http://")) {link_url=Some(hd.into());}
+                }
+                if let Some(params)=object.get("params").and_then(Value::as_str).and_then(|s|serde_json::from_str::<Value>(s).ok()) {
+                    if link_thumb.is_none() {link_thumb=pick_str(&params,&["thumb","thumbnail","thumbUrl"]).filter(|s|s.starts_with("http://")||s.starts_with("https://"));}
+                    if link_url.is_none() {link_url=pick_str(&params,&["hd","url","videoUrl","fileUrl"]).filter(|s|s.starts_with("http://")||s.starts_with("https://"));}
+                }
+            }
+        }
+    }
 
     let mut content = raw_content_val
         .and_then(extract_content_text)
         .unwrap_or_default();
+    if let Some((_,placeholder))=media_label {
+        if content.is_empty() || content.starts_with("https://") || content.starts_with("http://") { content=placeholder.into(); }
+    }
     let is_undo_type = matches!(msg_type.as_str(), "chat.undo" | "undo" | "31");
     if is_undo_type {
         content = "[Tin nhắn đã thu hồi]".to_string();
@@ -4058,6 +4089,16 @@ pub async fn find_user_by_phone(s: &Session, raw_phone: &str) -> Result<PhoneLoo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn received_photos_and_videos_have_inline_metadata() {
+        let photo=parse_chat_message(&json!({"msgId":"p","msgType":"chat.photo","ts":1700000000000u64,"content":{"href":"https://photo.zdn.vn/p.jpg","hd":"https://photo.zdn.vn/hd.jpg","thumb":"https://photo.zdn.vn/t.webp"}})).unwrap();
+        assert_eq!(photo.text,"[Hình ảnh]");assert_eq!(photo.link_src.as_deref(),Some("Hình ảnh Zalo"));assert_eq!(photo.link_url.as_deref(),Some("https://photo.zdn.vn/hd.jpg"));
+        let video=parse_chat_message(&json!({"msgId":"v","msgType":"chat.video","content":"{\"url\":\"https://video.zdn.vn/v.mp4\",\"thumbnail\":\"https://photo.zdn.vn/t.jpg\",\"caption\":\"Một đoạn phim\"}"})).unwrap();
+        assert_eq!(video.link_src.as_deref(),Some("Video Zalo"));assert_eq!(video.link_url.as_deref(),Some("https://video.zdn.vn/v.mp4"));assert_eq!(video.text,"Một đoạn phim");
+        let mut cached=sample_thread("group");cached.messages.push(ChatMessage{id:"p".into(),text:"https://photo.zdn.vn/p.jpg".into(),..Default::default()});
+        let mut fresh=sample_thread("group");fresh.messages.push(photo);merge_thread_into(&mut cached,fresh,true);assert_eq!(cached.messages[0].link_src.as_deref(),Some("Hình ảnh Zalo"));
+    }
 
     #[tokio::test]
     async fn unauthenticated_calls_fail_cleanly() {

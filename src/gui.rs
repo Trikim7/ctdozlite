@@ -74,6 +74,9 @@ pub enum GuiEvent {
         key: String,
         image: egui::ColorImage,
     },
+    InlineVideoReady {url:String,path:tempfile::TempPath},
+    InlineVideoFailed {url:String},
+    ImageFailed {key:String},
     StickerStoreLoaded(Vec<crate::chat::StickerPackInfo>),
     StickerPackItemsLoaded {
         cate_id: u64,
@@ -311,6 +314,7 @@ pub struct ZaloGuiApp {
     input_message: String,
     ime_state: crate::input_method::ImeState,
     history_sync_started: bool,
+    phone_sync_on_start: bool,
     history_status: String,
     history_sync_active: bool,
     status_msg: String,
@@ -322,6 +326,8 @@ pub struct ZaloGuiApp {
     filter_starred_only: bool,
     active_call: Option<ActiveCallOverlay>,
     image_viewer: Option<ImageViewerModal>,
+    inline_video: Option<crate::inline_video::InlineVideo>,
+    video_loading_url: Option<String>,
 
     info_drawer_open: bool,
     profile_menu_open: bool,
@@ -367,7 +373,6 @@ pub struct ZaloGuiApp {
     dismissed_link_preview_for: String,
     friend_status_map: HashMap<String, crate::chat::FriendshipStatus>,
     checking_friend_status: HashSet<String>,
-    allow_quit: bool,
     settings_modal_open: bool,
     settings_tab: SettingsTab,
     settings: AppSettings,
@@ -498,6 +503,7 @@ impl ZaloGuiApp {
             input_message: String::new(),
             ime_state: crate::input_method::ImeState::default(),
             history_sync_started: false,
+            phone_sync_on_start: false,
             history_status: String::new(),
             history_sync_active: false,
             replying_to: None,
@@ -506,6 +512,8 @@ impl ZaloGuiApp {
             filter_starred_only: false,
             active_call: None,
             image_viewer: None,
+            inline_video: None,
+            video_loading_url: None,
             status_msg: "Trực tuyến · Sẵn sàng".into(),
             info_drawer_open: true,
             profile_menu_open: false,
@@ -556,7 +564,6 @@ impl ZaloGuiApp {
             dismissed_link_preview_for: String::new(),
             friend_status_map: HashMap::new(),
             checking_friend_status: HashSet::new(),
-            allow_quit: false,
             settings_modal_open: false,
             settings_tab: SettingsTab::General,
             settings: loaded_settings,
@@ -650,7 +657,7 @@ impl ZaloGuiApp {
                     if self.is_logged_in && !updates.is_empty() {
                         if !self.history_sync_started {
                             self.history_sync_started=true;
-                            if let Some(tx)=WORKER_TX.get() {let _=tx.send(WorkerCmd::SyncHistory);}
+                            if let Some(tx)=WORKER_TX.get() {let command=if std::mem::take(&mut self.phone_sync_on_start){WorkerCmd::SyncPhone}else{WorkerCmd::SyncHistory};let _=tx.send(command);}
                         }
                         let prev_selected_name = self
                             .threads
@@ -921,9 +928,25 @@ impl ZaloGuiApp {
                     self.status_msg = "Đã thu hồi tin nhắn với mọi người".into();
                 }
                 GuiEvent::StickerImageReady { key, image } => {
+                    ctx.data_mut(|data| {let mut failed=data.get_temp::<HashSet<String>>(Id::new("failed_images")).unwrap_or_default();failed.remove(&key);data.insert_temp(Id::new("failed_images"),failed);});
                     self.loading_stickers.remove(&key);
                     let tex = ctx.load_texture(&key, image, TextureOptions::LINEAR);
                     self.sticker_textures.insert(key, tex);
+                }
+                GuiEvent::ImageFailed {key} => {
+                    ctx.data_mut(|data| {let mut failed=data.get_temp::<HashSet<String>>(Id::new("failed_images")).unwrap_or_default();failed.insert(key);data.insert_temp(Id::new("failed_images"),failed);});
+                }
+                GuiEvent::InlineVideoReady {url,path} => {
+                    if self.video_loading_url.as_deref()==Some(&url) {
+                        self.video_loading_url=None;
+                        match crate::inline_video::InlineVideo::new(url,path,ctx.clone()) {
+                            Ok(player)=>self.inline_video=Some(player),
+                            Err(error)=>self.show_toast(&error.to_string()),
+                        }
+                    }
+                }
+                GuiEvent::InlineVideoFailed {url} => {
+                    if self.video_loading_url.as_deref()==Some(&url) {self.video_loading_url=None;self.show_toast("Không tải được video. Tệp có thể đã hết hạn hoặc lớn hơn 256 MB.");}
                 }
                 GuiEvent::StickerStoreLoaded(packs) => {
                     self.sticker_store_loading = false;
@@ -1149,15 +1172,23 @@ impl ZaloGuiApp {
 // Main eframe::App Implementation
 // ---------------------------------------------------------------------------
 
+impl ZaloGuiApp {pub fn prefer_phone_sync_once(&mut self){self.phone_sync_on_start=true;}}
+
 impl eframe::App for ZaloGuiApp {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.inline_video=None;
+        self.settings.save();
+        if self.is_logged_in {crate::chat::save_threads_cache(&self.threads);}
+    }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Q)) {
-            self.allow_quit = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        if std::path::Path::new("activate.request").exists() {
+            let _=std::fs::remove_file("activate.request");
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
-        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_quit {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Q)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         if self.theme_dirty {
             self.palette().apply_to_ctx(ctx);
@@ -1166,6 +1197,18 @@ impl eframe::App for ZaloGuiApp {
 
         ctx.input(|i| self.ime_state.update(&i.events));
         self.check_events(ctx);
+        if !self.is_logged_in {self.inline_video=None;self.video_loading_url=None;}
+        let mut video_state=crate::inline_video::VideoUiState::default();
+        if let Some(player)=self.inline_video.as_ref() {
+            let key=crate::inline_video::texture_key(&player.url);
+            if let Some(image)=player.take_frame() {
+                if let Some(texture)=self.sticker_textures.get_mut(&key) {texture.set(image,TextureOptions::LINEAR);}
+                else {self.sticker_textures.insert(key.clone(),ctx.load_texture(&key,image,TextureOptions::LINEAR));}
+            }
+            video_state=player.state();
+        }
+        video_state.loading=self.video_loading_url.clone();
+        ctx.data_mut(|data|data.insert_temp(crate::inline_video::state_id(),video_state));
 
         // Non-overlapping long-poll trigger; wakes only every 1.2s to keep idle CPU ~0%
         if self.is_logged_in && self.last_poll.elapsed() >= Duration::from_millis(1200) {
@@ -1207,7 +1250,11 @@ impl eframe::App for ZaloGuiApp {
                     if self.history_sync_active && ui.small_button("Dừng tải").clicked() {
                         if let Some(tx)=WORKER_TX.get(){let _=tx.send(WorkerCmd::CancelHistory);}
                     }
-                    if !self.history_sync_active && ui.small_button("Thử tải lại").clicked() {
+                    if !self.history_sync_active && ui.small_button("Đồng bộ từ Android").clicked() {
+                        self.history_sync_active=true;
+                        if let Some(tx)=WORKER_TX.get(){let _=tx.send(WorkerCmd::SyncPhone);}
+                    }
+                    if !self.history_sync_active && ui.small_button("Tải lại từ máy chủ").clicked() {
                         self.history_sync_active=true;
                         if let Some(tx)=WORKER_TX.get(){let _=tx.send(WorkerCmd::SyncHistory);}
                     }
@@ -1450,22 +1497,9 @@ impl ZaloGuiApp {
                             [Pos2::new(cc.x + d, cc.y - d), Pos2::new(cc.x - d, cc.y + d)],
                             Stroke::new(1.4_f32, close_fg),
                         );
-                        let close_shift = ctx.input(|i| i.modifiers.shift);
-                        if close_resp.secondary_clicked() {
-                            self.allow_quit = true;
+                        let close_resp=close_resp.on_hover_text("Thoát ứng dụng");
+                        if close_resp.clicked() || close_resp.secondary_clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        } else if close_resp
-                            .on_hover_text(
-                                "Thu nhỏ xuống thanh tác vụ (Giữ Shift + Bấm hoặc Chuột phải để thoát hẳn)",
-                            )
-                            .clicked()
-                        {
-                            if close_shift {
-                                self.allow_quit = true;
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                            } else {
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                            }
                         }
 
                         // Maximize / Restore Button (46x32)

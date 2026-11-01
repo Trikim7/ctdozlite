@@ -939,6 +939,37 @@ pub(super) fn same_message_cluster(a: &ChatMessage, b: &ChatMessage) -> bool {
     true
 }
 
+fn render_inline_video(ui:&mut egui::Ui,msg:&ChatMessage,max_width:f32,textures:&HashMap<String,TextureHandle>,loading:&mut HashSet<String>)->Option<BubbleAction> {
+    let Some(url)=msg.link_url.as_deref().filter(|url|!url.is_empty()) else {ui.label("[Video không còn đường dẫn tải]");return None;};
+    let state=ui.ctx().data(|data|data.get_temp::<crate::inline_video::VideoUiState>(crate::inline_video::state_id())).unwrap_or_default();
+    let active=state.url.as_deref()==Some(url);let pending=state.loading.as_deref()==Some(url);
+    let video_key=crate::inline_video::texture_key(url);
+    let thumb_key=msg.link_thumb.as_deref().filter(|url|!url.is_empty()).map(|thumb| {
+        let key=format!("thumb_{}",crate::crypto::md5_hex(thumb));
+        if !textures.contains_key(&key)&&loading.insert(key.clone()) {
+            if let Some(tx)=WORKER_TX.get(){let _=tx.send(WorkerCmd::FetchStickerImage {key:key.clone(),url:thumb.to_string()});}
+        }
+        key
+    });
+    let texture=if active {textures.get(&video_key)} else {None}.or_else(||thumb_key.as_ref().and_then(|key|textures.get(key)));
+    let size=Vec2::new(max_width.clamp(160.0,360.0),max_width.clamp(160.0,360.0)*9.0/16.0);
+    let response=if let Some(texture)=texture {ui.add(egui::Image::new(texture).fit_to_exact_size(size).rounding(Rounding::same(8.0)).sense(Sense::click()))}
+    else {let(rect,response)=ui.allocate_exact_size(size,Sense::click());ui.painter().rect_filled(rect,Rounding::same(8.0),Color32::from_rgb(25,28,34));ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,"Video",FontId::proportional(18.0),Color32::WHITE);response};
+    let mut action=if response.clicked()&&!pending {Some(if active {BubbleAction::ToggleVideo} else {BubbleAction::PlayVideo{url:url.to_string()}})} else {None};
+    ui.horizontal(|ui| {
+        if pending {ui.spinner();ui.label("Đang tải video…");}
+        else {
+            let label=if active&&state.playing {"Tạm dừng"} else if active&&state.finished {"Phát lại"} else {"Phát video"};
+            if ui.button(label).clicked(){action=Some(if active {BubbleAction::ToggleVideo} else {BubbleAction::PlayVideo{url:url.to_string()}});}
+            if active {ui.label(format!("{}:{:02}",state.seconds/60,state.seconds%60));}
+        }
+        if (active||pending)&&ui.small_button("Dừng").clicked(){action=Some(BubbleAction::StopVideo);}
+    });
+    if active {if let Some(error)=state.error {ui.label(error);}}
+    if !msg.text.starts_with("[Video]")&&!msg.text.starts_with("http") {ui.label(&msg.text);}
+    action
+}
+
 pub(super) fn render_message_body(
     ui: &mut egui::Ui,
     msg: &ChatMessage,
@@ -974,6 +1005,10 @@ pub(super) fn render_message_body(
     } else {
         thread_name.to_string()
     };
+
+    if msg.link_src.as_deref()==Some("Video Zalo") || trimmed_text.starts_with("[Video]") {
+        return render_inline_video(ui,msg,max_text_width,sticker_textures,loading_stickers);
+    }
 
     // Dedicated inline Photo Card when the message is an uploaded/received Zalo photo
     let is_zalo_photo = msg.link_src.as_deref() == Some("Hình ảnh Zalo")
@@ -1061,6 +1096,14 @@ pub(super) fn render_message_body(
                     });
                 }
             } else {
+                let failed=ui.ctx().data(|data|data.get_temp::<HashSet<String>>(Id::new("failed_images"))).unwrap_or_default().contains(&key);
+                if failed {
+                    ui.label("Ảnh đã hết hạn hoặc không tải được");
+                    if ui.small_button("Thử tải ảnh lại").clicked() {
+                        ui.ctx().data_mut(|data| {let mut set=data.get_temp::<HashSet<String>>(Id::new("failed_images")).unwrap_or_default();set.remove(&key);data.insert_temp(Id::new("failed_images"),set);});
+                        if let Some(tx)=WORKER_TX.get(){let _=tx.send(WorkerCmd::FetchStickerImage {key:key.clone(),url:thumb_url.to_string()});}
+                    }
+                } else {ui.spinner();}
                 let ph_frame = egui::Frame::none()
                     .fill(text_col.linear_multiply(0.08))
                     .rounding(Rounding::same(10.0))
@@ -1787,6 +1830,9 @@ pub(super) enum BubbleAction {
     DeleteForMe,
     RecallForEveryone,
     CallAgain { is_video: bool },
+    PlayVideo {url:String},
+    ToggleVideo,
+    StopVideo,
     OpenImagePopup {
         tex_key: String,
         full_url: String,

@@ -1024,6 +1024,8 @@ impl ZaloGuiApp {
                     self.in_chat_search_query = q_str;
                 }
                 if let Some((idx, tid, is_group)) = clicked_thread {
+                    self.inline_video=None;self.video_loading_url=None;
+                    self.sticker_textures.retain(|key,_|!key.starts_with("video_"));
                     if self.selected_thread_index != idx {
                         self.replying_to = None;
                         self.filter_starred_only = false;
@@ -2557,6 +2559,15 @@ impl ZaloGuiApp {
                                         });
                                     }
                                 }
+                                BubbleAction::PlayVideo {url} => {
+                                    self.inline_video=None;self.video_loading_url=Some(url.clone());
+                                    self.sticker_textures.retain(|key,_|!key.starts_with("video_"));
+                                    if let Some(tx)=WORKER_TX.get(){let _=tx.send(WorkerCmd::LoadInlineVideo {url});}
+                                }
+                                BubbleAction::ToggleVideo => {
+                                    if let Some(player)=self.inline_video.as_mut(){if let Err(error)=player.toggle(){self.show_toast(&error.to_string());}}
+                                }
+                                BubbleAction::StopVideo => {self.inline_video=None;self.video_loading_url=None;self.sticker_textures.retain(|key,_|!key.starts_with("video_"));}
                                 BubbleAction::OpenImagePopup {
                                     tex_key,
                                     full_url,

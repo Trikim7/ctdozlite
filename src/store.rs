@@ -59,6 +59,7 @@ impl MessageStore {
             }
         }
         let conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(15))?;
         let marked: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='history_encryption')",
             [],
@@ -204,7 +205,7 @@ impl MessageStore {
     }
 
     /// Insert a message. Returns `true` if a new row was inserted, `false` if already existed.
-    pub fn upsert_message(&mut self, msg: &StoredMessage) -> Result<bool> {
+    pub fn upsert_message(&self, msg: &StoredMessage) -> Result<bool> {
         let encoded = self.crypt_message(msg.clone(), true)?;
         let rows = self.conn.execute(
             "INSERT OR IGNORE INTO messages (msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json)
@@ -247,7 +248,7 @@ impl MessageStore {
     }
 
     /// Insert or update thread metadata.
-    pub fn upsert_thread(&mut self, t: &StoredThread) -> Result<()> {
+    pub fn upsert_thread(&self, t: &StoredThread) -> Result<()> {
         self.conn.execute(
             "INSERT INTO threads (thread_id, name, is_group, last_ts)
              VALUES (?1, ?2, ?3, ?4)
@@ -651,14 +652,19 @@ impl From<&ChatMessage> for StoredMessage {
 
 /// Persist threads and their messages to SQLite store, returning the count of newly inserted messages.
 pub fn persist_threads(store: &mut MessageStore, threads: &[Thread]) -> Result<usize> {
-    let result = persist_threads_inner(store, threads);
+    let result = (|| {
+        let transaction=rusqlite::Transaction::new_unchecked(&store.conn,rusqlite::TransactionBehavior::Immediate)?;
+        let inserted=persist_threads_inner(store,threads)?;
+        transaction.commit()?;
+        Ok(inserted)
+    })();
     if result.is_err() {
         crate::logger::report_history_error();
     }
     result
 }
 
-fn persist_threads_inner(store: &mut MessageStore, threads: &[Thread]) -> Result<usize> {
+fn persist_threads_inner(store: &MessageStore, threads: &[Thread]) -> Result<usize> {
     let mut new_count = 0;
     for t in threads {
         let last_ts = t.messages.iter().map(|m| m.ts).max().unwrap_or(0);
@@ -892,6 +898,16 @@ mod tests {
         assert_eq!(msgs[2].msg_id, "m3");
         let latest=store.messages_for(thread_id,2).unwrap();
         assert_eq!(latest.iter().map(|m|m.ts).collect::<Vec<_>>(),vec![200,300]);
+    }
+
+    #[test]
+    fn failed_history_batch_rolls_back_all_its_messages() {
+        let mut store=MessageStore::open(":memory:").unwrap();
+        store.conn.execute_batch("CREATE TRIGGER reject_test_message BEFORE INSERT ON messages WHEN NEW.msg_id='reject' BEGIN SELECT RAISE(ABORT,'test failure'); END;").unwrap();
+        let thread=Thread{id:"rollback-thread".into(),name:"Name".into(),preview:String::new(),time:String::new(),avatar:None,is_group:true,messages:vec![ChatMessage{id:"accept".into(),text:"first".into(),ts:1000,..Default::default()},ChatMessage{id:"reject".into(),text:"second".into(),ts:2000,..Default::default()}]};
+        assert!(persist_threads(&mut store,&[thread]).is_err());
+        assert!(store.messages_for("rollback-thread",10).unwrap().is_empty());
+        assert!(store.all_threads().unwrap().is_empty());
     }
 
     #[test]

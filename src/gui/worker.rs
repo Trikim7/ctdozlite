@@ -8,6 +8,7 @@ pub enum WorkerCmd {
     },
     RefreshThreads,
     SyncHistory,
+    SyncPhone,
     CancelHistory,
     PollMessages {
         known_threads: Vec<(String, String, bool)>,
@@ -62,6 +63,7 @@ pub enum WorkerCmd {
         caption: String,
         preset_path: Option<std::path::PathBuf>,
     },
+    LoadInlineVideo {url:String},
     FetchStickerImage {
         key: String,
         url: String,
@@ -284,12 +286,15 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                     egui_ctx.clone(),
                 ));
 
+                let (phone_events,_)=tokio::sync::broadcast::channel::<crate::socket::WsEvent>(1024);
+                let socket_commands:std::sync::Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<crate::socket::SocketCommand>>>>=Default::default();
                 // 1) Real-time `zpw_ws` WebSocket loop for instant chat messages + VoIP events
                 {
                     let s_ws = session.clone();
                     let cb = call_bridge.clone();
                     let gui_tx_ws = gui_tx.clone();
                     let ctx_ws = egui_ctx.clone();
+                    let phone_bus=phone_events.clone();let commands=socket_commands.clone();
                     tokio::spawn(async move {
                         let mut ws_rx: Option<
                             tokio::sync::mpsc::UnboundedReceiver<crate::socket::WsEvent>,
@@ -301,7 +306,8 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                 let cur_sek = s_snap.zpw_sek.clone().unwrap_or_default();
                                 if !cur_sek.is_empty() && (ws_rx.is_none() || ws_sek != cur_sek) {
                                     ws_sek = cur_sek;
-                                    ws_rx = Some(crate::socket::spawn(s_snap.clone()));
+                                    let (receiver,sender)=crate::socket::spawn_with_commands(s_snap.clone());
+                                    *commands.lock().await=Some(sender);ws_rx=Some(receiver);
                                 }
                                 if let Some(rx) = ws_rx.as_mut() {
                                     match tokio::time::timeout(
@@ -311,6 +317,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                     .await
                                     {
                                         Ok(Some(ev)) => {
+                                            if matches!(ev.cmd,590..=592)||ev.is_voip_ish(){let _=phone_bus.send(ev.clone());}
                                             let data_node = ev
                                                 .payload
                                                 .get("data")
@@ -401,15 +408,36 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
 
                 let mut current_qr_task: Option<tokio::task::JoinHandle<()>> = None;
                 let mut history_task: Option<tokio::task::JoinHandle<()>> = None;
+                let mut phone_task:Option<tokio::task::JoinHandle<()>>=None;
+                let mut phone_cancel:Option<tokio::sync::watch::Sender<bool>>=None;
 
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
                         WorkerCmd::CancelHistory => {
+                            if let Some(cancel)=phone_cancel.take(){let _=cancel.send(true);}
                             if let Some(task)=history_task.take() {task.abort();}
                             let _=gui_tx.send(GuiEvent::HistoryFinished("Đã dừng tải; các tin nhắn đã tải được giữ lại.".into()));
                             egui_ctx.request_repaint();
                         }
+                        WorkerCmd::SyncPhone => {
+                            if let Some(task)=history_task.take(){task.abort();}
+                            if phone_task.as_ref().is_some_and(|task|!task.is_finished()) {continue;}
+                            let Some(commands)=socket_commands.lock().await.clone() else {
+                                let _=gui_tx.send(GuiEvent::HistoryFinished("Kết nối thời gian thực chưa sẵn sàng; hãy thử đồng bộ lại sau vài giây.".into()));continue;
+                            };
+                            let s=session.lock().await.clone();let rx=phone_events.subscribe();let tx=gui_tx.clone();let ctx=egui_ctx.clone();
+                            let (cancel_tx,cancel_rx)=tokio::sync::watch::channel(false);phone_cancel=Some(cancel_tx);
+                            phone_task=Some(tokio::spawn(async move {
+                                let result=crate::phone_sync::run(s,commands,rx,cancel_rx,|update| {
+                                    let event=match update {crate::phone_sync::Update::Status(status)=>GuiEvent::HistoryStatus(status),crate::phone_sync::Update::Threads(threads)=>GuiEvent::HistoryUpdated(threads)};
+                                    let _=tx.send(event);ctx.request_repaint();
+                                }).await;
+                                let status=result.unwrap_or_else(|error|format!("Đồng bộ Android chưa xong: {error}"));
+                                let _=tx.send(GuiEvent::HistoryFinished(status));ctx.request_repaint();
+                            }));
+                        }
                         WorkerCmd::SyncHistory => {
+                            if phone_task.as_ref().is_some_and(|task|!task.is_finished()) {continue;}
                             if let Some(task)=history_task.take() {task.abort();}
                             let shared=session.clone(); let tx=gui_tx.clone(); let ctx=egui_ctx.clone();
                             history_task=Some(tokio::spawn(async move {
@@ -453,6 +481,8 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                             });
                         }
                         WorkerCmd::Logout => {
+                            if let Some(task)=phone_task.take(){task.abort();}
+                            phone_cancel=None;
                             if let Some(task)=history_task.take() {task.abort();}
                             if let Some(task) = current_qr_task.take() {
                                 task.abort();
@@ -472,6 +502,8 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                             egui_ctx.request_repaint();
                         }
                         WorkerCmd::RequestQr => {
+                            if let Some(task)=phone_task.take(){task.abort();}
+                            phone_cancel=None;
                             if let Some(task)=history_task.take() {task.abort();}
                             if let Some(task) = current_qr_task.take() {
                                 task.abort();
@@ -1317,6 +1349,17 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                 }
                             });
                         }
+                        WorkerCmd::LoadInlineVideo {url} => {
+                            let client=session.lock().await.http.clone();let tx=gui_tx.clone();let ctx=egui_ctx.clone();
+                            tokio::spawn(async move {
+                                let result=tokio::time::timeout(Duration::from_secs(120),crate::inline_video::download_video(&client,&url)).await;
+                                match result {
+                                    Ok(Ok(path))=>{let _=tx.send(GuiEvent::InlineVideoReady {url,path});},
+                                    _=>{let _=tx.send(GuiEvent::InlineVideoFailed {url});},
+                                }
+                                ctx.request_repaint();
+                            });
+                        }
                         WorkerCmd::FetchStickerImage { key, url } => {
                             let session_clone = session.clone();
                             let gui_tx_clone = gui_tx.clone();
@@ -1326,8 +1369,10 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                 let _ = std::fs::create_dir_all(cache_dir);
                                 let cache_path = cache_dir.join(format!("{key}.png"));
 
-                                let bytes_opt = if let Ok(disk_bytes) = std::fs::read(&cache_path) {
-                                    if image::load_from_memory(&disk_bytes).is_ok() {
+                                let private_media=key.starts_with("thumb_");
+                                let cached=if private_media {None} else {std::fs::read(&cache_path).ok()};
+                                let bytes_opt = if let Some(disk_bytes) = cached {
+                                    if crate::inline_video::decode_image(&disk_bytes).is_ok() {
                                         Some(disk_bytes)
                                     } else {
                                         let _ = std::fs::remove_file(&cache_path);
@@ -1337,12 +1382,14 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                     std::fs::read(&url).ok()
                                 } else {
                                     let client = { session_clone.lock().await.clone().http };
-                                    if let Ok(resp) = client.get(&url).send().await {
+                                    let request=if private_media {crate::inline_video::media_response(&client,&url).await} else {client.get(&url).send().await.map_err(anyhow::Error::from)};
+                                    if let Ok(resp) = request {
                                         if resp.status().is_success() {
-                                            if let Ok(b) = resp.bytes().await {
+                                            if let Ok(b) = crate::inline_video::read_image_bytes(resp).await {
+                                                if b.len()>24*1024*1024 {let _=gui_tx_clone.send(GuiEvent::ImageFailed {key});ctx_clone.request_repaint();return;}
                                                 let vec = b.to_vec();
-                                                if image::load_from_memory(&vec).is_ok() {
-                                                    let _ = std::fs::write(&cache_path, &vec);
+                                                if crate::inline_video::decode_image(&vec).is_ok() {
+                                                    if !private_media {let _ = std::fs::write(&cache_path, &vec);}
                                                     Some(vec)
                                                 } else {
                                                     None
@@ -1359,7 +1406,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                 };
 
                                 if let Some(bytes) = bytes_opt {
-                                    if let Ok(dyn_img) = image::load_from_memory(&bytes) {
+                                    if let Ok(dyn_img) = crate::inline_video::decode_image(&bytes) {
                                         let mut rgba = dyn_img.to_rgba8();
                                         // Apply smooth anti-aliased circular alpha mask for avatar textures (`ava_*`)
                                         if key.starts_with("ava_") {
@@ -1409,8 +1456,10 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                             image: color_img,
                                         });
                                         ctx_clone.request_repaint();
+                                        return;
                                     }
                                 }
+                                let _=gui_tx_clone.send(GuiEvent::ImageFailed {key});ctx_clone.request_repaint();
                             });
                         }
                         WorkerCmd::FetchStickerStore => {

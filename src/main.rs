@@ -90,6 +90,17 @@ async fn main() -> Result<()> {
     // Open the native GUI window IMMEDIATELY without blocking on network requests!
     // Background worker in `gui.rs` handles `get_server_info`, `get_friends`, and `poll_new_messages`.
     if force_gui || (!force_tui && !force_qr && !args.iter().any(|a| a.starts_with("--phone"))) {
+        use fs2::FileExt;
+        let mut options=std::fs::OpenOptions::new();options.create(true).truncate(false).read(true).write(true);
+        #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
+        let _instance=options.open("gui-instance.lock")?;
+        if let Err(error)=_instance.try_lock_exclusive() {
+            if error.kind()==std::io::ErrorKind::WouldBlock {
+                let _=storage::atomic_write(std::path::Path::new("activate.request"),b"activate");
+                return Ok(());
+            }
+            return Err(error.into());
+        }
         println!("🚀 Đang khởi chạy giao diện đồ họa Zalo GUI (egui)…");
         #[cfg(target_os = "windows")]
         if !dev_mode {
@@ -127,11 +138,14 @@ async fn main() -> Result<()> {
         }
 
         let app_session = s;
+        let sync_phone=args.iter().any(|arg|arg=="--sync-phone");
         return eframe::run_native(
             "Zalo - Rust Native Client",
             native_options,
             Box::new(move |cc| {
-                Ok(Box::new(gui::ZaloGuiApp::new(cc, app_session, dev_mode, initial_threads)))
+                let mut app=gui::ZaloGuiApp::new(cc, app_session, dev_mode, initial_threads);
+                if sync_phone {app.prefer_phone_sync_once();}
+                Ok(Box::new(app))
             }),
         )
         .map_err(|e| anyhow::anyhow!("Không thể khởi chạy GUI: {e}"));
@@ -237,3 +251,7 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
+mod inline_video;
+
+mod phone_sync;

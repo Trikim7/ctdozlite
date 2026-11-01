@@ -4,4 +4,5 @@ export XMODIFIERS="${XMODIFIERS:-@im=ibus}"
 export GTK_IM_MODULE="${GTK_IM_MODULE:-ibus}"
 export QT_IM_MODULE="${QT_IM_MODULE:-ibus}"
 APP_BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export PATH="$APP_BIN_DIR:$PATH"
 exec "$APP_BIN_DIR/zalo-rust" "$@"

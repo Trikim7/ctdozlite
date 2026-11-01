@@ -2,15 +2,20 @@
 
 Bản fork của [ctdoteam1110/ctdozlite](https://github.com/ctdoteam1110/ctdozlite), một Zalo client không chính thức viết bằng Rust với GUI và TUI. Giữ nguyên giấy phép MIT / Apache-2.0 và ghi nhận tác giả gốc.
 
-**Phiên bản mã nguồn của fork: 0.1.2.** Các bản EXE/DEB/DMG từ repository gốc không chứa những sửa đổi dưới đây. Không dùng chúng để đánh giá bản fork.
+**Phiên bản mã nguồn của fork: 0.1.3.** Các bản EXE/DEB/DMG từ repository gốc không chứa những sửa đổi dưới đây. Không dùng chúng để đánh giá bản fork.
 
-## Bản 0.1.2
+## Bản 0.1.3
 
 - Hiển thị giờ Việt Nam (GMT+7), sửa cả giờ trong cache cũ; hội thoại chưa có tin nhắn không hiện giờ giả.
 - Lấy tên nhóm theo lô và giữ tên thật bắt đầu bằng “Nhóm”. Kiểm tra đọc trực tiếp đã nhận đủ tên của 215/215 nhóm trên tài khoản thử.
 - Hỗ trợ IME trên Linux với bản vá egui-winit; đã thử nhập “tiếng việt” bằng IBus Bamboo trên X11. Enter chốt dấu không gửi tin; Enter tiếp theo mới gửi.
 - Tự tải lịch sử còn trên máy chủ cho nhóm và Cloud, có tiến độ, dừng/thử lại và lưu từng trang vào kho mã hóa. Tin cũ không tăng số chưa đọc. Máy chủ có thể từ chối các trang cũ; giao diện báo số hội thoại chưa tải được.
-- **Đồng bộ trực tiếp từ điện thoại chưa hoạt động.** Phần giải mã định dạng chuyển lịch sử mới được thử bằng dữ liệu giả; chưa tích hợp luồng xác nhận trên điện thoại và nhập lịch sử thật. Tải lịch sử máy chủ không thay thế được tính năng này.
+- Đồng bộ trực tiếp từ Android qua sync-v2: dùng kết nối socket hiện có, xác nhận trên điện thoại, giải mã từng lô và lưu vào kho lịch sử mã hóa. Lần thử thật đã nhận/lưu 6.148 tin trước khi gặp tranh chấp SQLite do nhiều cửa sổ app cùng mở. Chưa coi toàn bộ lịch sử đã đồng bộ xong.
+- Nút X thoát ứng dụng; chỉ mở một cửa sổ cho mỗi thư mục dữ liệu. Khi bấm mở lần nữa, đưa cửa sổ đang chạy lên trước.
+- Ảnh hiển thị trong hội thoại, video có khung phát, tạm dừng/phát tiếp và âm thanh; tệp video tải tạm được xóa khi dừng/đóng. Cần FFmpeg và FFplay trên PATH; giới hạn video 256 MB.
+- Ghi lịch sử theo giao dịch SQLite cho mỗi lô để tránh ghi dở dang và giảm tranh chấp.
+
+Đồng bộ Android cần Node.js 24+ để chạy adapter giải mã riêng qua pipe; không dùng Electron. Thành phần JS/WASM công khai của Zalo được tải vào `phone_sync_runtime`, kiểm tra SHA256 trước khi dùng, không phân phối trong repo/bộ cài. Khóa chuyển lịch sử chỉ tồn tại trong bộ nhớ của helper; không ghi khóa vào cache hay log. Đây là ngoại lệ tùy chọn cho mục tiêu client Rust gọn nhẹ. Tài khoản hiện tại đã thử được metadata, xác nhận Android và nhập tin thật; còn cần thử việc hoàn tất toàn bộ và các trường hợp mất kết nối.
 
 ## Đã cải tiến
 

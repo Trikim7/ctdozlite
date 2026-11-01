@@ -32,3 +32,14 @@ Tự tải tin nhắn cũ, ưu tiên đồng bộ trực tiếp từ điện tho
 - IME probe: src/bin/ime_probe.rs; script thao tác ngoại tuyến work/type_ime_probe.py.
 - Nghiên cứu: work/reference/full-transfer-probe.cjs, crypto-probe.cjs, protobuf-probe.cjs và client JS/WASM công khai. Không đưa dữ liệu/khóa thật vào các probe này.
 - Nhật ký: work/final-012-tests.log, work/final-012-clippy.log, work/release-012.log, work/live-pagination*.log.
+
+
+## Cập nhật 0.1.3
+
+Người dùng xác nhận dùng Android, sẵn sàng và đã bấm cho phép đồng bộ trên điện thoại. Đã triển khai adapter Node 24 + runtime Zalo tải riêng, pin SHA256; receiver dùng cùng socket GUI, khóa chỉ trong bộ nhớ, nhập từng lô vào lịch sử mã hóa. Đã nhận và lưu 6.148 tin thật. Phiên CLI dừng ở lỗi SQLite database is locked, khi đồng thời xuất hiện hai cửa sổ bản cũ. Chưa coi toàn bộ lịch sử đã đồng bộ xong.
+
+Đã sửa nhận control data dạng JSON string, ánh xạ /api/gid/encrypt và decrypt có hai lớp data, chuyển enum loại tin của điện thoại sang loại tin GUI. Thêm giao dịch nguyên tử SQLite mỗi đợt lưu và chặn mở nhiều GUI. Bổ sung --sync-phone để ưu tiên đồng bộ Android một lần sau đăng nhập; nút đồng bộ Android và dừng trên banner.
+
+Nút X nay thoát, lưu cache mã hóa khi thoát. Ảnh nhận vào có nhãn loại media đúng; hỗ trợ thumbnail WebP/GIF. Video phát trong hội thoại bằng FFmpeg và FFplay; tệp tải riêng 0600, tối đa 256 MB, giải mã chỉ dùng file/pipe, có play/pause/replay, dừng khi chuyển hội thoại. Đã thử thành công phát/pause/resume và xóa file tạm bằng fixture ngoại tuyến. 123 bài test thư viện đạt, 4 ignored; riêng test playback ignored đã được chạy và đạt trên máy này.
+
+Log chỉ số: work/phone-real-sync2.log; không in nội dung, ID, khóa. Diagnostic CLI src/bin/phone_sync.rs (--diagnose, --self-test, --run); --run chỉ dùng khi GUI đã đóng. Không mở hai kết nối đồng bộ song song. Tiếp tục thử bằng bản mới để tránh tranh chấp với cửa sổ cũ. FFmpeg/FFplay được cài riêng trong ~/.local/lib/ctdozlite-media và wrapper ~/.local/bin, không đổi gói hệ thống.

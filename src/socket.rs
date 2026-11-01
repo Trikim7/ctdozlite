@@ -358,13 +358,18 @@ fn pull_next_frame(
 /// Connect, authenticate, pull the control/voip queues, then stream events.
 ///
 /// Reconnects forever with capped backoff. Dropping the returned receiver stops the task.
-pub fn spawn(sess: Session) -> mpsc::UnboundedReceiver<WsEvent> {
+pub fn spawn(sess: Session) -> mpsc::UnboundedReceiver<WsEvent> { spawn_with_commands(sess).0 }
+
+#[derive(Debug)]
+pub struct SocketCommand {pub cmd:u16,pub data:Value}
+pub fn spawn_with_commands(sess: Session) -> (mpsc::UnboundedReceiver<WsEvent>,mpsc::UnboundedSender<SocketCommand>) {
     let (tx, rx) = mpsc::unbounded_channel();
+    let (commands,mut command_rx)=mpsc::unbounded_channel::<SocketCommand>();
     tokio::spawn(async move {
         let mut backoff = 2u64;
         let mut endpoint_idx = 0usize;
         loop {
-            match run_once(&sess, &tx, endpoint_idx).await {
+            match run_once(&sess, &tx, endpoint_idx,&mut command_rx).await {
                 Ok(reason) => trace(format!("closed: {reason}")),
                 Err(e) => trace(format!("error: {e:#}")),
             }
@@ -377,13 +382,14 @@ pub fn spawn(sess: Session) -> mpsc::UnboundedReceiver<WsEvent> {
             backoff = (backoff * 2).min(30);
         }
     });
-    rx
+    (rx,commands)
 }
 
 async fn run_once(
     sess: &Session,
     tx: &mpsc::UnboundedSender<WsEvent>,
     endpoint_idx: usize,
+    commands:&mut mpsc::UnboundedReceiver<SocketCommand>,
 ) -> Result<String> {
     let url = build_url(sess, endpoint_idx);
     crate::session::require_trusted_zalo_url(&url, true)?;
@@ -425,6 +431,12 @@ async fn run_once(
 
     loop {
         tokio::select! {
+            Some(command)=commands.recv(), if authed => {
+                // Only the phone-transfer controller can use this internal command channel.
+                if matches!(command.cmd,590..=592) {
+                    ws.send(Message::Binary(encode_frame(command.cmd,0,1,Some(&command.data)).into())).await?;
+                }
+            }
             _ = ping.tick() => {
                 if authed {
                     let body = json!({ "eventId": now_ms() });

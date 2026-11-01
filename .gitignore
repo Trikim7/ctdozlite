@@ -52,3 +52,8 @@ session*.json.lock
 *.migration.lock
 *.db.lock
 threads_cache.json.lock
+
+# Optional downloaded phone protocol runtime and desktop coordination
+phone_sync_runtime/
+gui-instance.lock
+activate.request

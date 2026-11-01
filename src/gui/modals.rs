@@ -163,7 +163,6 @@ impl ZaloGuiApp {
                             .on_hover_cursor(CursorIcon::PointingHand)
                             .clicked()
                         {
-                            self.allow_quit = true;
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
                     });

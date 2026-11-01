@@ -24,5 +24,5 @@ if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$APP_DIR" >/dev/null 2>&1 || true
 fi
 
-echo "Đã cài đặt thành công ctdozlite v0.1.2 tại $BIN_DIR/ctdozlite"
+echo "Đã cài đặt thành công ctdozlite v0.1.3 tại $BIN_DIR/ctdozlite"
 echo "Chạy ứng dụng bằng lệnh: ctdozlite (hoặc mở từ menu ứng dụng)."

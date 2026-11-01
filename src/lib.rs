@@ -20,3 +20,7 @@ pub mod store;
 pub mod tui;
 pub mod ui;
 pub mod voip_log;
+
+pub mod inline_video;
+
+pub mod phone_sync;
