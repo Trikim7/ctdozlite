@@ -50,7 +50,7 @@ jobs:
           cp src/assets/app_icon.png pkg_deb/usr/share/icons/hicolor/256x256/apps/ctdozlite.png
           cat > pkg_deb/DEBIAN/control << 'EOF'
           Package: ctdozlite
-          Version: 0.1.1
+          Version: 0.1.2
           Section: net
           Priority: optional
           Architecture: amd64
@@ -59,13 +59,13 @@ jobs:
           Maintainer: TIPC1110 <tienichpc1110@gmail.com>
           Description: Lightweight native Zalo PC client written in Rust
           EOF
-          dpkg-deb --build --root-owner-group pkg_deb dist/ctdozlite_0.1.1_amd64.deb
+          dpkg-deb --build --root-owner-group pkg_deb dist/ctdozlite_0.1.2_amd64.deb
       - name: Package .rpm (Fedora / RHEL / Rocky / AlmaLinux / CentOS / openSUSE)
         run: |
           mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
           cat > rpmbuild/SPECS/ctdozlite.spec << 'EOF'
           Name:           ctdozlite
-          Version:        0.1.1
+          Version:        0.1.2
           Release:        1
           Summary:        Native Zalo Desktop Client written in Rust
           License:        MIT OR Apache-2.0
@@ -93,7 +93,7 @@ jobs:
           /usr/share/icons/hicolor/256x256/apps/ctdozlite.png
           EOF
           rpmbuild --define "_topdir $(pwd)/rpmbuild" -bb rpmbuild/SPECS/ctdozlite.spec
-          cp rpmbuild/RPMS/x86_64/*.rpm dist/ctdozlite-0.1.1-1.x86_64.rpm
+          cp rpmbuild/RPMS/x86_64/*.rpm dist/ctdozlite-0.1.2-1.x86_64.rpm
       - name: Package .AppImage (Universal single-file executable for all Linux distros)
         run: |
           mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
@@ -118,11 +118,11 @@ jobs:
           curl -fsSL -o appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
           echo "ac7fd56feade6002c2f57db39587113275d351fce911a5fbb29ea84cd0666cab  appimagetool" | sha256sum -c -
           chmod +x appimagetool
-          ARCH=x86_64 ./appimagetool --appimage-extract-and-run AppDir dist/ctdozlite-0.1.1-x86_64.AppImage
-          chmod +x dist/ctdozlite-0.1.1-x86_64.AppImage
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run AppDir dist/ctdozlite-0.1.2-x86_64.AppImage
+          chmod +x dist/ctdozlite-0.1.2-x86_64.AppImage
       - name: Package portable .tar.gz with universal install.sh (Arch / Manjaro / Gentoo / Void / any Linux)
         run: |
-          STAGE="ctdozlite-0.1.1-linux-x86_64"
+          STAGE="ctdozlite-0.1.2-linux-x86_64"
           mkdir -p "$STAGE"
           cp target/release/zalo-rust "$STAGE/zalo-rust"
           cp packaging/linux/ctdozlite "$STAGE/ctdozlite"
@@ -171,7 +171,7 @@ jobs:
           cp src/assets/app_icon.png pkg_deb/usr/share/icons/hicolor/256x256/apps/ctdozlite.png
           cat > pkg_deb/DEBIAN/control << 'EOF'
           Package: ctdozlite
-          Version: 0.1.1
+          Version: 0.1.2
           Section: net
           Priority: optional
           Architecture: amd64
@@ -180,9 +180,9 @@ jobs:
           Maintainer: TIPC1110 <tienichpc1110@gmail.com>
           Description: Lightweight native Zalo PC client written in Rust (glibc 2.31+ compatible)
           EOF
-          dpkg-deb --build --root-owner-group pkg_deb dist/ctdozlite_0.1.1_legacy_glibc2.31_amd64.deb
+          dpkg-deb --build --root-owner-group pkg_deb dist/ctdozlite_0.1.2_legacy_glibc2.31_amd64.deb
 
-          STAGE="ctdozlite-0.1.1-linux-x86_64-legacy-glibc2.31"
+          STAGE="ctdozlite-0.1.2-linux-x86_64-legacy-glibc2.31"
           mkdir -p "$STAGE"
           cp target/release/zalo-rust "$STAGE/zalo-rust"
           cp packaging/linux/ctdozlite "$STAGE/ctdozlite"
@@ -214,9 +214,9 @@ jobs:
         run: |
           cargo build --release --locked --bin zalo-rust
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item target\release\zalo-rust.exe dist\ctdozlite-0.1.1-portable-windows-x86_64.exe
+          Copy-Item target\release\zalo-rust.exe dist\ctdozlite-0.1.2-portable-windows-x86_64.exe
           iscc packaging\windows\installer.iss
-          Move-Item dist\ctdozlite-setup-windows-x86_64.exe dist\ctdozlite-0.1.1-setup-windows-x86_64.exe -Force
+          Move-Item dist\ctdozlite-setup-windows-x86_64.exe dist\ctdozlite-0.1.2-setup-windows-x86_64.exe -Force
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ctdozlite-windows-exe
@@ -243,7 +243,7 @@ jobs:
           cp target/release/zalo-rust dist/dmg/ctdozlite.app/Contents/MacOS/zalo-rust
           cp packaging/macos/Info.plist dist/dmg/ctdozlite.app/Contents/Info.plist
           ln -s /Applications dist/dmg/Applications
-          hdiutil create -volname "ctdozlite" -srcfolder dist/dmg -ov -format UDZO dist/ctdozlite-0.1.1-macos.dmg
+          hdiutil create -volname "ctdozlite" -srcfolder dist/dmg -ov -format UDZO dist/ctdozlite-0.1.2-macos.dmg
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ctdozlite-macos-dmg
@@ -293,32 +293,32 @@ jobs:
 
             #### 🐧 Bản cài đặt cho Linux (Hỗ trợ mọi bản phân phối Linux)
             - **Ubuntu 22.04 / 24.04 / Debian 12+ / Linux Mint 21+ / Kali / Pop!_OS / Zorin:**
-              Tải `ctdozlite_0.1.1_amd64.deb` và chạy:
+              Tải `ctdozlite_0.1.2_amd64.deb` và chạy:
               ```bash
-              sudo apt install ./ctdozlite_0.1.1_amd64.deb
+              sudo apt install ./ctdozlite_0.1.2_amd64.deb
               ```
             - **Ubuntu 20.04 / Debian 11 / Linux Mint 20 (Máy Linux đời cũ `glibc >= 2.31`):**
-              Tải `ctdozlite_0.1.1_legacy_glibc2.31_amd64.deb` và chạy:
+              Tải `ctdozlite_0.1.2_legacy_glibc2.31_amd64.deb` và chạy:
               ```bash
-              sudo apt install ./ctdozlite_0.1.1_legacy_glibc2.31_amd64.deb
+              sudo apt install ./ctdozlite_0.1.2_legacy_glibc2.31_amd64.deb
               ```
             - **Fedora / RHEL / Rocky Linux / AlmaLinux / CentOS / openSUSE:**
-              Tải `ctdozlite-0.1.1-1.x86_64.rpm` và chạy:
+              Tải `ctdozlite-0.1.2-1.x86_64.rpm` và chạy:
               ```bash
-              sudo dnf install ./ctdozlite-0.1.1-1.x86_64.rpm
+              sudo dnf install ./ctdozlite-0.1.2-1.x86_64.rpm
               ```
             - **AppImage (Chạy ngay trên mọi bản Linux không cần cài đặt):**
-              Tải `ctdozlite-0.1.1-x86_64.AppImage` và chạy:
+              Tải `ctdozlite-0.1.2-x86_64.AppImage` và chạy:
               ```bash
-              chmod +x ctdozlite-0.1.1-x86_64.AppImage
-              ./ctdozlite-0.1.1-x86_64.AppImage
+              chmod +x ctdozlite-0.1.2-x86_64.AppImage
+              ./ctdozlite-0.1.2-x86_64.AppImage
               ```
             - **Arch Linux / Manjaro / EndeavourOS / Gentoo / Void / Mọi distro khác (`.tar.gz`):**
-              Tải `ctdozlite-0.1.1-linux-x86_64.tar.gz` (hoặc bản `legacy-glibc2.31`), giải nén và chạy `./install.sh`.
+              Tải `ctdozlite-0.1.2-linux-x86_64.tar.gz` (hoặc bản `legacy-glibc2.31`), giải nén và chạy `./install.sh`.
 
             #### 🪟 Bản cài đặt cho Windows (x64)
-            - Bộ cài đặt: `ctdozlite-0.1.1-setup-windows-x86_64.exe`
-            - Bản chạy ngay (Portable): `ctdozlite-0.1.1-portable-windows-x86_64.exe`
+            - Bộ cài đặt: `ctdozlite-0.1.2-setup-windows-x86_64.exe`
+            - Bản chạy ngay (Portable): `ctdozlite-0.1.2-portable-windows-x86_64.exe`
 
             #### 🍎 Bản cài đặt cho macOS
-            - `ctdozlite-0.1.1-macos.dmg`
+            - `ctdozlite-0.1.2-macos.dmg`

@@ -8,6 +8,7 @@ pub enum WorkerCmd {
     },
     RefreshThreads,
     SyncHistory,
+    CancelHistory,
     PollMessages {
         known_threads: Vec<(String, String, bool)>,
     },
@@ -403,6 +404,11 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
 
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        WorkerCmd::CancelHistory => {
+                            if let Some(task)=history_task.take() {task.abort();}
+                            let _=gui_tx.send(GuiEvent::HistoryFinished("Đã dừng tải; các tin nhắn đã tải được giữ lại.".into()));
+                            egui_ctx.request_repaint();
+                        }
                         WorkerCmd::SyncHistory => {
                             if let Some(task)=history_task.take() {task.abort();}
                             let shared=session.clone(); let tx=gui_tx.clone(); let ctx=egui_ctx.clone();
@@ -411,7 +417,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                 let Some(owner)=s.login.as_ref().map(|l|l.uin.clone()) else {return;};
                                 let _=tx.send(GuiEvent::HistoryStatus("Đang tải lịch sử có trên máy chủ Zalo…".into()));ctx.request_repaint();
                                 let Ok(mut threads)=crate::chat::get_friends(&s).await else {
-                                    let _=tx.send(GuiEvent::HistoryStatus("Chưa tải được danh sách hội thoại; mở lại ứng dụng để thử lại.".into()));return;
+                                    let _=tx.send(GuiEvent::HistoryFinished("Chưa tải được danh sách hội thoại; mở lại ứng dụng để thử lại.".into()));return;
                                 };
                                 if let Ok(previews)=crate::chat::get_last_msgs(&s,&[]).await {crate::chat::merge_previews(&mut threads,&previews);}
                                 let _=tx.send(GuiEvent::HistoryUpdated(threads.clone()));ctx.request_repaint();
@@ -422,7 +428,9 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                     if shared.lock().await.login.as_ref().map(|l|l.uin.as_str())!=Some(owner.as_str()) {return;}
                                     let Some(thread)=threads.iter_mut().find(|t|t.id==*id) else {continue;};
                                     let _=tx.send(GuiEvent::HistoryStatus(format!("Đang tải lịch sử máy chủ: {}/{} hội thoại",index+1,ids.len())));ctx.request_repaint();
-                                    match crate::sync_history::backfill_thread(&s,thread).await {
+                                    match crate::sync_history::backfill_thread(&s,thread,|count| {
+                                        let _=tx.send(GuiEvent::HistoryStatus(format!("Lịch sử máy chủ: {}/{} hội thoại • {count} tin nhắn đã tải trong hội thoại này",index+1,ids.len())));ctx.request_repaint();
+                                    }).await {
                                         Ok(n)=>added+=n,Err(_)=>failed+=1,
                                     }
                                     if shared.lock().await.login.as_ref().map(|l|l.uin.as_str())!=Some(owner.as_str()) {return;}
@@ -430,7 +438,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                     let _=tx.send(GuiEvent::HistoryUpdated(vec![thread.clone()]));ctx.request_repaint();
                                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                                 }
-                                let _=tx.send(GuiEvent::HistoryStatus(format!("Đã tải {added} tin nhắn lịch sử có trên máy chủ; {failed} hội thoại chưa tải được. Đồng bộ trực tiếp từ điện thoại chưa được hỗ trợ.")));ctx.request_repaint();
+                                let _=tx.send(GuiEvent::HistoryFinished(format!("Đã tải {added} tin lịch sử máy chủ; {failed} hội thoại chưa tải được. Chưa có đồng bộ trực tiếp từ điện thoại.")));ctx.request_repaint();
                             }));
                         }
                         WorkerCmd::PersistThreads(threads_snapshot) => {

@@ -2,7 +2,15 @@
 
 Bản fork của [ctdoteam1110/ctdozlite](https://github.com/ctdoteam1110/ctdozlite), một Zalo client không chính thức viết bằng Rust với GUI và TUI. Giữ nguyên giấy phép MIT / Apache-2.0 và ghi nhận tác giả gốc.
 
-**Phiên bản mã nguồn của fork: 0.1.1. Chưa phát hành bộ cài của fork.** Các bản EXE/DEB/DMG từ repository gốc không chứa những sửa đổi dưới đây. Không dùng chúng để đánh giá bản fork.
+**Phiên bản mã nguồn của fork: 0.1.2.** Các bản EXE/DEB/DMG từ repository gốc không chứa những sửa đổi dưới đây. Không dùng chúng để đánh giá bản fork.
+
+## Bản 0.1.2
+
+- Hiển thị giờ Việt Nam (GMT+7), sửa cả giờ trong cache cũ; hội thoại chưa có tin nhắn không hiện giờ giả.
+- Lấy tên nhóm theo lô và giữ tên thật bắt đầu bằng “Nhóm”. Kiểm tra đọc trực tiếp đã nhận đủ tên của 215/215 nhóm trên tài khoản thử.
+- Hỗ trợ IME trên Linux với bản vá egui-winit; đã thử nhập “tiếng việt” bằng IBus Bamboo trên X11. Enter chốt dấu không gửi tin; Enter tiếp theo mới gửi.
+- Tự tải lịch sử còn trên máy chủ cho nhóm và Cloud, có tiến độ, dừng/thử lại và lưu từng trang vào kho mã hóa. Tin cũ không tăng số chưa đọc. Máy chủ có thể từ chối các trang cũ; giao diện báo số hội thoại chưa tải được.
+- **Đồng bộ trực tiếp từ điện thoại chưa hoạt động.** Phần giải mã định dạng chuyển lịch sử mới được thử bằng dữ liệu giả; chưa tích hợp luồng xác nhận trên điện thoại và nhập lịch sử thật. Tải lịch sử máy chủ không thay thế được tính năng này.
 
 ## Đã cải tiến
 

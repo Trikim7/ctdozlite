@@ -247,7 +247,7 @@ pub fn merge_thread_into(
         if !incoming.time.is_empty() {
             target.time = incoming.time;
         }
-    } else if target.time.is_empty() && !incoming.time.is_empty() {
+    } else if (target.time.is_empty() || incoming_id_is_authoritative) && !incoming.time.is_empty() {
         target.time = incoming.time;
     }
 }
@@ -348,6 +348,8 @@ pub fn normalize_thread_times(threads: &mut [Thread]) {
         }
         if let Some(latest) = thread.messages.iter().filter(|m| m.ts > 0).max_by_key(|m| m.ts) {
             thread.time = latest.time.clone();
+        } else if thread.preview.is_empty() || thread.preview == "Chưa có tin nhắn" {
+            thread.time.clear();
         }
     }
 }
@@ -4086,6 +4088,24 @@ mod tests {
             is_group: false,
             messages: Vec::new(),
         }
+    }
+
+    #[test]
+    fn cached_times_use_vietnam_timezone_and_empty_threads_have_no_fake_time() {
+        let mut thread=sample_thread("time-test");
+        thread.time="22:13".into();
+        thread.messages.push(ChatMessage { ts:1700000000, time:"22:13".into(), ..Default::default() });
+        normalize_thread_times(std::slice::from_mut(&mut thread));
+        assert_eq!(thread.messages[0].ts,1700000000000);
+        assert_eq!(thread.messages[0].time,"05:13");
+        assert_eq!(thread.time,"05:13");
+        thread.messages.clear();
+        normalize_thread_times(std::slice::from_mut(&mut thread));
+        assert!(thread.time.is_empty());
+        thread.preview="Latest preview".into(); thread.time="22:13".into();
+        let mut incoming=sample_thread("time-test");incoming.time="05:13".into();
+        merge_thread_into(&mut thread,incoming,true);
+        assert_eq!(thread.time,"05:13");
     }
 
     #[test]

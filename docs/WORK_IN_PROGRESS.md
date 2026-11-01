@@ -1,46 +1,34 @@
-# Công việc ctdozlite đã tạm dừng — 01/11/2026
+# Tiến độ ctdozlite — 01/11/2026
 
-## Yêu cầu cần tiếp tục
+## Yêu cầu
 
-1. Tự đồng bộ tin nhắn cũ. Người dùng xác nhận lịch sử có cả trên điện thoại và Web/PC, **ưu tiên lấy từ điện thoại**.
-2. Hỗ trợ gõ tiếng Việt qua IBus Bamboo.
-3. Hiển thị tên nhóm thật thay cho “Nhóm + ID”.
-4. Hiển thị giờ theo GMT+7 trong danh sách hội thoại và nội dung chat.
+Tự tải tin nhắn cũ, ưu tiên đồng bộ trực tiếp từ điện thoại; hỗ trợ IBus Bamboo; lấy tên nhóm thật; hiển thị giờ GMT+7.
 
-## Bản ổn định và vị trí mã nguồn
+## Đã xác minh
 
-- Bản đang cài: 0.1.1, binary `/home/triskim/.local/bin/zalo-rust`; chưa thay bằng bản sửa mới.
-- Repository: `/home/triskim/Documents/Codex/2026-11-01/kie/work/ctdozlite`.
-- Base đã đẩy lên GitHub: `c105e6871121d19375a038cb8c2481bd975fa3bd`.
-- Thay đổi mới lưu trên nhánh cục bộ `wip/history-ibus-groups-vntime`; chưa đẩy lên GitHub.
+- 215/215 nhóm lấy được tên, 79 avatar. Chẩn đoán chỉ in số lượng/trường dữ liệu, không in tên, ID, nội dung hoặc khóa.
+- GMT+7 cho tin nhắn, hội thoại, giờ đọc SQLite và cache cũ. Xóa giờ giả của hội thoại không có tin; metadata mới có thể sửa giờ cũ.
+- IBus Bamboo/X11 đã gõ đúng “tiếng việt” trong native probe ngoại tuyến. Enter đầu commit không gửi, Enter sau mới kích hoạt gửi giả. Không gửi tin thử vào tài khoản thật, không đổi cấu hình Bamboo toàn hệ thống.
+- Vendor egui-winit có giấy phép và ghi nguồn upstream. Bổ sung xử lý XIM Disabled đến trước Commit và Commit không có Preedit để không mất từ thứ hai.
+- Backfill nhóm/Cloud tự chạy một lần sau đăng nhập: phân trang đến hết, chặn cursor lặp, lưu từng trang mã hóa thay vì ghi lại cả hội thoại mỗi trang, giữ timestamp mới nhất trong SQLite, không báo unread. Có dừng/thử lại.
+- Kiểm tra trực tiếp nhận được 25 tin ở trang gần nhất của một nhóm; yêu cầu trang cũ trả lỗi -69. Chưa xác nhận tải hết nhiều trang trên tài khoản thật; app báo thất bại thay vì coi đó là lịch sử trống.
+- Bộ thử thư viện cuối: 118 pass, 0 fail, 3 ignore, gồm sửa SQLite. Release build thành công. Clippy với -D warnings chưa đạt vì 42 cảnh báo ở mã cũ; không coi lint là đạt.
 
-## Đã làm và bằng chứng
+## Đồng bộ điện thoại — còn dang dở
 
-- Sửa lấy metadata nhóm: ép version=0 và chia lô 25 nhóm. Kiểm tra đọc trực tiếp trên tài khoản trả 215 nhóm, 208 nhóm có tên được nhận diện ở thời điểm kiểm tra. Không in tên nhóm, ID, nội dung hay khóa vào log chẩn đoán. Sau đó đã sửa thêm nhận diện nhãn tạm để tên thật bắt đầu bằng “Nhóm ” không bị coi là tên tạm; chưa chạy lại toàn bộ kiểm tra sau sửa cuối này.
-- Thêm hàm định dạng GMT+7, dùng cho parse tin nhắn, hội thoại, lịch sử SQLite và cache cũ. Kiểm thử ngày/giờ đã qua trong lần chạy 115 tests.
-- Thêm tự tải lịch sử có trên máy chủ ở nền, phân trang có chặn cursor lặp, giữ mã hóa lịch sử, không đánh dấu lịch sử vừa tải là tin chưa đọc. Đây là backfill từ máy chủ, **không phải đồng bộ trực tiếp từ điện thoại**.
-- Thêm chặn Enter gửi tin khi IME đang soạn/commit, launcher thiết lập XIM/IBus.
-- Tìm thấy egui-winit 0.29.1 bỏ qua IME trên Linux. Đã vendor crate, giữ giấy phép, áp dụng backport upstream PR #5198 / merge commit `3ffe1ed7742a8927caee818c49018f59c93b0615`.
-- Bộ test thư viện gần nhất: 115 pass, 3 ignore. Lần này chạy trước một số sửa cuối và backport; không coi là xác nhận toàn bộ trạng thái WIP.
+- Chưa gửi yêu cầu chuyển lịch sử thật vì receiver/importer chưa hoàn chỉnh.
+- Đã xác minh ngoại tuyến bằng dữ liệu giả: crypto WASM chính thức tạo identity/ephemeral, mã hóa/giải mã metadata và message, kiểm tra chống sửa ciphertext.
+- Đã thử trọn định dạng: protobuf -> Zstd -> mã hóa -> file chunk có u32 little-endian -> giải mã -> giải nén -> protobuf. Giữ đúng tiếng Việt và ID lớn. Đây không phải bằng chứng đồng bộ với điện thoại thật.
+- Thành phần proprietary tải công khai chỉ nằm ngoài repo trong work/reference, không phân phối cùng app. Binary Rust không phụ thuộc Node.js.
+- Còn cần runtime crypto được phép phân phối hoặc backend tương thích; nối request/receiver trên socket hiện có; quản lý xác nhận/cancel trên điện thoại; ánh xạ globalNoisedId với UID hội thoại; nhập dữ liệu thật vào kho mã hóa và thử trên thiết bị.
+- Không đánh dấu yêu cầu đồng bộ điện thoại hoàn tất chỉ vì tải được lịch sử máy chủ.
 
-## Phần chưa xong
+## Điểm tiếp tục và dữ liệu
 
-- **Đồng bộ trực tiếp từ điện thoại chưa triển khai.** Client Zalo hiện tại dùng sync-v2, request 590 / wake-up 592, phiên riêng, khóa identity/ephemeral và dữ liệu batch mã hóa (crypto WASM riêng). Có endpoint HTTP `/api/transfer-sync-v2/request-sync` và các endpoint legacy `pull_mobile_msg`, `get_crossdb`, nhưng chưa đủ receiver/decryptor để triển khai đúng; chưa gửi yêu cầu chuyển lịch sử giả hoặc không thể giải mã.
-- Native IME probe đã chạy hai lần và chưa đạt: trước backport không nhận IME, chỉ có dấu cách; sau backport lần thử vẫn không nhận được chuỗi mẫu, ghi 1 sự kiện IME. Đã sửa probe ghi chi tiết sự kiện và thao tác click focus, compile thành công nhưng **chưa chạy lại lần thử mới nhất** do người dùng yêu cầu dừng.
-- Cần rà soát giới hạn phân trang 200 trang/hội thoại, việc tiếp tục sau ngắt, hiệu năng ghi lại toàn bộ thread mỗi trang và kiểm thử trực tiếp pagination trước khi coi backfill hoàn tất.
-- Chưa cập nhật số phiên bản, chưa build/phát hành/cài bản mới, chưa commit vào main hoặc đẩy WIP lên GitHub.
-
-## Điểm tiếp tục
-
-1. Tiếp tục native probe ngoại tuyến, không gõ hay gửi tin thử vào hội thoại thật. `src/bin/ime_probe.rs`, `/home/triskim/Documents/Codex/2026-11-01/kie/work/type_ime_probe.py`, `work/ime-result.json`, `work/ime-build.log`.
-2. Xác minh focus/IBus preedit và bản backport; sau đó chạy lại toàn bộ tests.
-3. Tập trung luồng phone-to-PC theo ưu tiên người dùng; tách rõ với server backfill, không báo hoàn thành đồng bộ điện thoại khi chỉ tải lịch sử máy chủ.
-4. Kiểm tra tên nhóm và giờ trực tiếp, xử lý các nhóm không có metadata, kiểm tra không tăng unread do lịch sử cũ.
-5. Chỉ sau kiểm chứng mới tăng phiên bản, đẩy main và cập nhật bản cài; bảo toàn kho khóa, session và lịch sử mã hóa.
-
-## Tệp hỗ trợ ngoài repository
-
-- Build helper: `/home/triskim/Documents/Codex/2026-11-01/kie/work/build.sh`.
-- Diagnostic đọc tài khoản: `/home/triskim/Documents/Codex/2026-11-01/kie/work/diagnostics/check_sync.rs` (đã chuyển khỏi repo vì chứa đường dẫn máy cụ thể).
-- Log kiểm tra: `work/live-sync-check.log`, `work/sync-tests.log`, `work/ime-probe.log`.
-- Tham khảo giao thức tải từ client công khai: `work/reference/web-shared.js`, `work/reference/web-startup.js`, `work/reference/sync-v2-worker.js`; đây là tài liệu tham khảo, chưa đưa vào sản phẩm.
+- Nhánh: wip/history-ibus-groups-vntime; commit lưu trước lần tiếp tục: 9aebef1.
+- Mã nguồn: work/ctdozlite; build helper: work/build.sh (đường dẫn máy cụ thể ngoài repo).
+- Dữ liệu thật: ~/.local/share/ctdozlite. Khóa gắn với đường dẫn tuyệt đối; giữ nguyên dữ liệu và kho khóa khi cài cập nhật.
+- Chẩn đoán đọc tài khoản: work/diagnostics/check_sync.rs, đã chuyển ra ngoài repo.
+- IME probe: src/bin/ime_probe.rs; script thao tác ngoại tuyến work/type_ime_probe.py.
+- Nghiên cứu: work/reference/full-transfer-probe.cjs, crypto-probe.cjs, protobuf-probe.cjs và client JS/WASM công khai. Không đưa dữ liệu/khóa thật vào các probe này.
+- Nhật ký: work/final-012-tests.log, work/final-012-clippy.log, work/release-012.log, work/live-pagination*.log.

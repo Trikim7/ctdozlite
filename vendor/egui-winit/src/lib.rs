@@ -340,11 +340,15 @@ impl State {
                         self.egui_input.events.push(egui::Event::Ime(egui::ImeEvent::Preedit(text.clone())));
                     }
                     winit::event::Ime::Commit(text) => {
+                        // Bamboo may commit a word without a preceding preedit event.
+                        self.ime_event_enable();
                         self.egui_input.events.push(egui::Event::Ime(egui::ImeEvent::Commit(text.clone())));
                         self.ime_event_disable();
                     }
                     winit::event::Ime::Disabled | winit::event::Ime::Preedit(_, None) => {
-                        self.ime_event_disable();
+                        // XIM can end preedit before delivering its commit. Ending the egui
+                        // composition here loses its selection/cursor range and drops words.
+                        if !cfg!(target_os = "linux") { self.ime_event_disable(); }
                     }
                 }
 

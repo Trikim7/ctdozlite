@@ -2968,7 +2968,7 @@ impl ZaloGuiApp {
                                         let mut send_selected_sticker: Option<
                                             crate::chat::StickerItem,
                                         > = None;
-                                        if !contextual_stickers.is_empty() && response.has_focus() {
+                                        if !contextual_stickers.is_empty() && response.has_focus() && self.ime_state.may_submit_enter() {
                                             let len = contextual_stickers.len();
                                             if ui.input(|i| i.key_pressed(Key::ArrowUp)) {
                                                 self.composer_sticker_selected = Some(0);

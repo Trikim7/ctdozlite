@@ -254,7 +254,7 @@ impl MessageStore {
              ON CONFLICT(thread_id) DO UPDATE SET
                  name = excluded.name,
                  is_group = excluded.is_group,
-                 last_ts = excluded.last_ts",
+                 last_ts = MAX(threads.last_ts, excluded.last_ts)",
             params![
                 t.thread_id,
                 self.cipher.encrypt("thread_name", &t.thread_id, &t.name)?,
@@ -265,13 +265,13 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Retrieve up to `limit` messages for a thread ordered by timestamp ascending.
+    /// Retrieve the latest `limit` messages, returned in chronological order.
     pub fn messages_for(&self, thread_id: &str, limit: usize) -> Result<Vec<StoredMessage>> {
         let mut stmt = self.conn.prepare(
             "SELECT msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json
              FROM messages
              WHERE thread_id = ?1
-             ORDER BY ts ASC
+             ORDER BY ts DESC, msg_id DESC
              LIMIT ?2",
         )?;
 
@@ -294,6 +294,7 @@ impl MessageStore {
         for r in rows {
             list.push(self.crypt_message(r?, false)?);
         }
+        list.reverse();
         Ok(list)
     }
 
@@ -889,6 +890,8 @@ mod tests {
         assert_eq!(msgs[1].msg_id, "m1");
         assert_eq!(msgs[2].ts, 300);
         assert_eq!(msgs[2].msg_id, "m3");
+        let latest=store.messages_for(thread_id,2).unwrap();
+        assert_eq!(latest.iter().map(|m|m.ts).collect::<Vec<_>>(),vec![200,300]);
     }
 
     #[test]
@@ -929,6 +932,11 @@ mod tests {
         // Second persist returns 0 newly inserted
         let count2 = persist_threads(&mut store, &[thread]).unwrap();
         assert_eq!(count2, 0);
+
+        // An old history page must not move the conversation's latest timestamp backwards.
+        store.upsert_thread(&StoredThread {thread_id:"t_test".into(),name:"Test Thread".into(),is_group:false,last_ts:500}).unwrap();
+        let last_ts:i64=store.conn.query_row("SELECT last_ts FROM threads WHERE thread_id='t_test'",[],|row|row.get(0)).unwrap();
+        assert_eq!(last_ts,2000);
 
         let msgs = store.messages_for("t_test", 10).unwrap();
         assert_eq!(msgs.len(), 2);

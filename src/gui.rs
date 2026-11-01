@@ -53,6 +53,7 @@ pub enum GuiEvent {
     ThreadsUpdated(Vec<Thread>),
     HistoryUpdated(Vec<Thread>),
     HistoryStatus(String),
+    HistoryFinished(String),
     MessageSent {
         thread_id: String,
         text: String,
@@ -311,6 +312,7 @@ pub struct ZaloGuiApp {
     ime_state: crate::input_method::ImeState,
     history_sync_started: bool,
     history_status: String,
+    history_sync_active: bool,
     status_msg: String,
 
     // Reply / forward state
@@ -497,6 +499,7 @@ impl ZaloGuiApp {
             ime_state: crate::input_method::ImeState::default(),
             history_sync_started: false,
             history_status: String::new(),
+            history_sync_active: false,
             replying_to: None,
             forward_msg: None,
             forward_filter: String::new(),
@@ -627,7 +630,8 @@ impl ZaloGuiApp {
                     self.login_in_progress = false;
                     self.login_status_msg = format!("Lỗi đăng nhập: {err}");
                 }
-                GuiEvent::HistoryStatus(status) => { self.history_status=status; }
+                GuiEvent::HistoryStatus(status) => { self.history_status=status; self.history_sync_active=true; }
+                GuiEvent::HistoryFinished(status) => { self.history_status=status; self.history_sync_active=false; }
                 GuiEvent::HistoryUpdated(updates) => {
                     let selected=self.threads.get(self.selected_thread_index).map(|t|t.id.clone());
                     for incoming in updates {
@@ -1197,7 +1201,18 @@ impl eframe::App for ZaloGuiApp {
             });
         }
         if self.is_logged_in && !self.history_status.is_empty() {
-            egui::TopBottomPanel::top("history_progress").show(ctx, |ui| {ui.label(&self.history_status);});
+            egui::TopBottomPanel::top("history_progress").show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(&self.history_status);
+                    if self.history_sync_active && ui.small_button("Dừng tải").clicked() {
+                        if let Some(tx)=WORKER_TX.get(){let _=tx.send(WorkerCmd::CancelHistory);}
+                    }
+                    if !self.history_sync_active && ui.small_button("Thử tải lại").clicked() {
+                        self.history_sync_active=true;
+                        if let Some(tx)=WORKER_TX.get(){let _=tx.send(WorkerCmd::SyncHistory);}
+                    }
+                });
+            });
         }
         // Dev Inspector Panel
         if self.dev_mode && self.dev_panel_open {
