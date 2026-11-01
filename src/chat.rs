@@ -345,9 +345,26 @@ pub fn load_threads_cache() -> Vec<Thread> {
     }
 }
 
+fn direct_media_label(url:&str)->Option<(&'static str,&'static str)> {
+    let parsed=reqwest::Url::parse(url).ok()?;let host=parsed.host_str()?;
+    let domain=|suffix:&str|host==suffix||host.strip_suffix(suffix).is_some_and(|p|p.ends_with('.'));
+    if !(domain("zdn.vn")||domain("zadn.vn")||domain("dlmd.me")){return None;}
+    if host.starts_with("video-")||host.starts_with("video.")||parsed.path().to_ascii_lowercase().ends_with(".mp4") {Some(("Video Zalo","[Video]"))}
+    else if host.starts_with("photo-")||host.starts_with("photo.") {Some(("Hình ảnh Zalo","[Hình ảnh]"))}else{None}
+}
+fn normalize_cached_media(message:&mut ChatMessage) {
+    if matches!(message.link_src.as_deref(),Some("Hình ảnh Zalo"|"Video Zalo")){return;}
+    if let Some((source,label))=message.link_url.as_deref().and_then(direct_media_label) {
+        message.link_src=Some(source.into());
+        if message.text.starts_with("https://")||message.text.starts_with("http://"){message.text=label.into();}
+        if message.link_title.as_deref().is_none_or(|s|s.starts_with("http")||s.is_empty()){message.link_title=Some(label.into());}
+    }
+}
+
 pub fn normalize_thread_times(threads: &mut [Thread]) {
     for thread in threads {
         for msg in &mut thread.messages {
+            normalize_cached_media(msg);
             if msg.ts > 0 { msg.ts = crate::ui::timestamp_ms(msg.ts); msg.time = crate::ui::time_hm(msg.ts); }
         }
         if let Some(latest) = thread.messages.iter().filter(|m| m.ts > 0).max_by_key(|m| m.ts) {
@@ -3270,7 +3287,7 @@ pub(crate) fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         "chat.video"|"video"|"4"=>Some(("Video Zalo","[Video]")),
         "chat.file"|"file"|"19"=>Some(("Tập tin Zalo","[Tập tin]")),
         _=>None,
-    };
+    }.or_else(||link_url.as_deref().and_then(direct_media_label));
     if let Some((source,title))=media_label {
         link_src=Some(source.into());
         if link_title.is_none() {link_title=Some(title.into());}
@@ -4096,6 +4113,9 @@ mod tests {
         assert_eq!(photo.text,"[Hình ảnh]");assert_eq!(photo.link_src.as_deref(),Some("Hình ảnh Zalo"));assert_eq!(photo.link_url.as_deref(),Some("https://photo.zdn.vn/hd.jpg"));
         let video=parse_chat_message(&json!({"msgId":"v","msgType":"chat.video","content":"{\"url\":\"https://video.zdn.vn/v.mp4\",\"thumbnail\":\"https://photo.zdn.vn/t.jpg\",\"caption\":\"Một đoạn phim\"}"})).unwrap();
         assert_eq!(video.link_src.as_deref(),Some("Video Zalo"));assert_eq!(video.link_url.as_deref(),Some("https://video.zdn.vn/v.mp4"));assert_eq!(video.text,"Một đoạn phim");
+        let recommended=parse_chat_message(&json!({"msgId":"recommended-video","msgType":"chat.recommended","content":{"href":"https://video-stal-42.dlmd.me/gr/fixture","thumb":"https://photo-stal-3.zdn.vn/t.jpg"}})).unwrap();
+        assert_eq!(recommended.link_src.as_deref(),Some("Video Zalo"));
+        let mut old=sample_thread("old");old.messages.push(ChatMessage{id:"old".into(),text:"https://video-stal-42.dlmd.me/gr/fixture".into(),link_url:Some("https://video-stal-42.dlmd.me/gr/fixture".into()),link_src:Some("video-stal-42.dlmd.me".into()),..Default::default()});normalize_thread_times(std::slice::from_mut(&mut old));assert_eq!(old.messages[0].text,"[Video]");assert_eq!(old.messages[0].link_src.as_deref(),Some("Video Zalo"));
         let mut cached=sample_thread("group");cached.messages.push(ChatMessage{id:"p".into(),text:"https://photo.zdn.vn/p.jpg".into(),..Default::default()});
         let mut fresh=sample_thread("group");fresh.messages.push(photo);merge_thread_into(&mut cached,fresh,true);assert_eq!(cached.messages[0].link_src.as_deref(),Some("Hình ảnh Zalo"));
     }

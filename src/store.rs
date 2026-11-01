@@ -696,6 +696,7 @@ pub fn load_history_into_threads(path: &str, threads: &mut Vec<Thread>, limit_pe
         let store = MessageStore::open(path)?;
         let mut candidate = threads.clone();
         store.hydrate_threads(&mut candidate, limit_per_thread)?;
+        crate::chat::normalize_thread_times(&mut candidate);
         *threads = candidate;
         Ok(())
     })();

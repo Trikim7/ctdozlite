@@ -1243,10 +1243,10 @@ impl eframe::App for ZaloGuiApp {
                     "Không đọc/ghi được một phần lịch sử an toàn. Dữ liệu cũ được giữ lại; hãy kiểm tra kho mật khẩu và dung lượng đĩa, rồi mở lại ứng dụng.");
             });
         }
-        if self.is_logged_in && !self.history_status.is_empty() {
+        if self.is_logged_in {
             egui::TopBottomPanel::top("history_progress").show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(&self.history_status);
+                    ui.label(if self.history_status.is_empty(){"Lịch sử tin nhắn"}else{&self.history_status});
                     if self.history_sync_active && ui.small_button("Dừng tải").clicked() {
                         if let Some(tx)=WORKER_TX.get(){let _=tx.send(WorkerCmd::CancelHistory);}
                     }

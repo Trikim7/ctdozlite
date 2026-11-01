@@ -107,7 +107,7 @@ pub fn trusted_media_url(raw:&str)->bool {
     let Ok(url)=reqwest::Url::parse(raw) else{return false;};
     url.scheme()=="https" && url.username().is_empty()&&url.password().is_none()
         && url.port_or_known_default()==Some(443)
-        && url.host_str().is_some_and(|host|["zdn.vn","zadn.vn","zalo.me","zaloapp.com"].iter().any(|suffix|host==*suffix||host.strip_suffix(suffix).is_some_and(|p|p.ends_with('.'))))
+        && url.host_str().is_some_and(|host|["zdn.vn","zadn.vn","dlmd.me","zalo.me","zaloapp.com"].iter().any(|suffix|host==*suffix||host.strip_suffix(suffix).is_some_and(|p|p.ends_with('.'))))
 }
 
 #[cfg(test)]
