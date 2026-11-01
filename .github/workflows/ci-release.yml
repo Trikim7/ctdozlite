@@ -109,14 +109,14 @@ jobs:
           HERE="$(dirname "$(readlink -f "${0}")")"
           export PATH="${HERE}/usr/bin:${PATH}"
           if [ $# -eq 0 ]; then
-              exec "${HERE}/usr/bin/zalo-rust" --gui
+              exec "${HERE}/usr/bin/ctdozlite" --gui
           else
-              exec "${HERE}/usr/bin/zalo-rust" "$@"
+              exec "${HERE}/usr/bin/ctdozlite" "$@"
           fi
           EOF
           chmod +x AppDir/AppRun
-          curl -fsSL -o appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
-          echo "ac7fd56feade6002c2f57db39587113275d351fce911a5fbb29ea84cd0666cab  appimagetool" | sha256sum -c -
+          curl -fsSL -o appimagetool "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage"
+          echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  appimagetool" | sha256sum -c -
           chmod +x appimagetool
           ARCH=x86_64 ./appimagetool --appimage-extract-and-run AppDir dist/ctdozlite-0.1.2-x86_64.AppImage
           chmod +x dist/ctdozlite-0.1.2-x86_64.AppImage
