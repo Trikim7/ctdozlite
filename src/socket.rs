@@ -75,7 +75,8 @@ fn now_ms() -> u64 {
 }
 
 fn trace_on() -> bool {
-    std::env::var("ZCALL_WS_TRACE").ok().as_deref() == Some("1")
+    crate::logger::sensitive_logging_enabled()
+        && std::env::var("ZCALL_WS_TRACE").ok().as_deref() == Some("1")
 }
 
 fn trace(msg: impl std::fmt::Display) {
@@ -385,7 +386,8 @@ async fn run_once(
     endpoint_idx: usize,
 ) -> Result<String> {
     let url = build_url(sess, endpoint_idx);
-    trace(format!("connect {url}"));
+    crate::session::require_trusted_zalo_url(&url, true)?;
+    trace(format!("connect {}", crate::session::redact_url(&url)));
 
     let mut req = url.clone().into_client_request()?;
     {

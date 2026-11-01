@@ -16,6 +16,8 @@ mod media;
 mod param_cipher;
 mod qr;
 mod session;
+mod secure_session;
+mod storage;
 mod socket;
 mod store;
 mod tui;
@@ -34,6 +36,8 @@ async fn main() -> Result<()> {
         println!("ctdozlite v{} (zalo-rust)", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    let data_dir = storage::init_data_directory()?;
+    eprintln!("Dữ liệu ứng dụng: {}", data_dir.display());
     let dev_mode = args.iter().any(|a| a == "--dev" || a == "-v" || a == "--verbose");
     let dump = args.iter().any(|a| a == "-d" || a == "--dump");
     let dump_raw = args.iter().any(|a| a == "--dump-raw");
@@ -114,8 +118,10 @@ async fn main() -> Result<()> {
             ..Default::default()
         };
 
-        let mut initial_threads = chat::load_threads_cache();
-        store::load_history_into_threads("zalo_history.db", &mut initial_threads, 200);
+        let mut initial_threads = if session_restored { chat::load_threads_cache() } else { Vec::new() };
+        if session_restored {
+            store::load_history_into_threads("zalo_history.db", &mut initial_threads, 200);
+        }
 
         let app_session = s;
         return eframe::run_native(

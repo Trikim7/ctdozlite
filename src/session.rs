@@ -164,6 +164,9 @@ pub struct Session {
 
 impl Session {
     pub fn new(verbose: bool, dump: bool, dump_raw: bool) -> Result<Self> {
+        if (dump || dump_raw) && !crate::logger::sensitive_logging_enabled() {
+            bail!("Ghi dump nhạy cảm đã bị tắt. Chỉ bật CTDOZLITE_SENSITIVE_LOGS=1 với tài khoản thử nghiệm.");
+        }
         let jar = Arc::new(Jar::default());
         let mut default_headers = HeaderMap::new();
         default_headers.insert(
@@ -175,6 +178,7 @@ impl Session {
             HeaderValue::from_static("https://chat.zalo.me"),
         );
         let http = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .cookie_provider(Arc::clone(&jar))
             .default_headers(default_headers)
             .connect_timeout(std::time::Duration::from_secs(10))
@@ -227,8 +231,9 @@ impl Session {
             &self.domains.sticker,
         ];
         for host in hosts {
+            if !trusted_zalo_url(host, false) { continue; }
             if let Ok(url) = reqwest::Url::parse(host) {
-                let cookie = format!("zpw_sek={v}; Path=/");
+                let cookie = format!("zpw_sek={v}; Path=/; Secure; HttpOnly");
                 self.jar.add_cookie_str(&cookie, &url);
             }
         }
@@ -338,6 +343,7 @@ impl Session {
             HeaderValue::from_static("https://chat.zalo.me"),
         );
         if let Ok(c) = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .cookie_provider(Arc::clone(&self.jar))
             .default_headers(default_headers)
             .connect_timeout(std::time::Duration::from_secs(10))
@@ -364,16 +370,15 @@ impl Session {
             login: self.login.clone(),
             domains: self.domains.clone(),
         };
-        let text = serde_json::to_string_pretty(&saved)?;
-        std::fs::write(path, text)?;
-        Ok(())
+        let result = crate::secure_session::save(std::path::Path::new(path), &saved);
+        crate::logger::set_session_storage_failed(result.is_err());
+        result
     }
 
     /// Load a previously saved session from disk and restore cookies, keys, and endpoints.
     pub fn load_from_file(&mut self, path: &str) -> Result<()> {
         use base64::Engine;
-        let text = std::fs::read_to_string(path)?;
-        let saved: SavedSession = serde_json::from_str(&text)?;
+        let saved = crate::secure_session::load(std::path::Path::new(path))?;
 
         self.imei = if saved.imei.len() == 69 {
             saved.imei
@@ -575,6 +580,7 @@ impl Session {
         mime_type: &str,
         file_bytes: &[u8],
     ) -> Result<Value> {
+        require_trusted_zalo_url(url, false)?;
         let boundary = format!(
             "----WebKitFormBoundary{}",
             crate::param_cipher::random_hex(16)
@@ -625,7 +631,7 @@ impl Session {
             },
         );
         if !status.is_success() {
-            anyhow::bail!("HTTP {status} from {url}: {}", truncate(&text, 300));
+            anyhow::bail!("HTTP {status} from {}", redact_url(url));
         }
         if text.trim().is_empty() {
             return Ok(serde_json::json!({ "error_code": 0, "data": null }));
@@ -636,35 +642,23 @@ impl Session {
     }
 
     async fn send(&self, m: Method, url: &str, body: Option<String>) -> Result<Value> {
+        require_trusted_zalo_url(url, false)?;
         let start = std::time::Instant::now();
+        let sensitive_logs = crate::logger::sensitive_logging_enabled();
         if self.verbose {
             eprintln!("→ {} {}", m, if self.dump_raw { url.to_string() } else { redact_url(url) });
-            if let Some(b) = &body {
-                eprintln!("  body: {}", truncate(b, 400));
+            if sensitive_logs {
+                if let Some(b) = &body { eprintln!("  body: {}", truncate(b, 400)); }
             }
         }
         let method = m.as_str().to_string();
         let mut rb = self.http.request(m, url);
         if let Some(ref sek) = self.zpw_sek {
             if !sek.is_empty() {
-                let is_zalo_host = reqwest::Url::parse(url)
-                    .map(|u| {
-                        u.host_str()
-                            .map(|h| {
-                                h == "zalo.me"
-                                    || h.ends_with(".zalo.me")
-                                    || h == "zaloapp.com"
-                                    || h.ends_with(".zaloapp.com")
-                            })
-                            .unwrap_or(false)
-                    })
-                    .unwrap_or_else(|_| url.contains("zalo.me") || url.contains("zaloapp.com"));
-                if is_zalo_host {
-                    rb = rb.header("Cookie", format!("zpw_sek={sek}; _zlang=vi"));
-                    rb = rb.header("zpw_sek", sek);
-                    rb = rb.header("Origin", "https://chat.zalo.me");
-                    rb = rb.header("Referer", "https://chat.zalo.me/");
-                }
+                rb = rb.header("Cookie", format!("zpw_sek={sek}; _zlang=vi"));
+                rb = rb.header("zpw_sek", sek);
+                rb = rb.header("Origin", "https://chat.zalo.me");
+                rb = rb.header("Referer", "https://chat.zalo.me/");
             }
         }
         if let Some(b) = &body {
@@ -694,7 +688,8 @@ impl Session {
         let status = resp.status();
         let text = resp.text().await?;
         if self.verbose {
-            eprintln!("← {status} {}", truncate(&text, 400));
+            if sensitive_logs { eprintln!("← {status} {}", truncate(&text, 400)); }
+            else { eprintln!("← {status} [response body omitted]"); }
         }
         if self.dump {
             self.dump_exchange(&method, url, status.as_u16(), &text);
@@ -718,7 +713,7 @@ impl Session {
         );
 
         if is_err {
-            bail!("HTTP {status} from {url}: {}", truncate(&text, 300));
+            bail!("HTTP {status} from {}", redact_url(url));
         }
         if text.trim().is_empty() {
             // Long-polling endpoints (`p4-msg-chat.zaloapp.com`) return HTTP 200 with an empty body `""`
@@ -742,7 +737,7 @@ impl Session {
                 Some(&text),
                 Some(&format!("server error {code}: {msg}")),
             );
-            bail!("server error {code}: {msg} (from {url})");
+            bail!("server error {code} (from {})", redact_url(url));
         }
         Ok(v)
     }
@@ -774,7 +769,7 @@ impl Session {
                 }
                 Err(e) => {
                     if self.verbose {
-                        eprintln!("  data decrypted but not JSON: {e} / {}", truncate(&pt, 200));
+                        eprintln!("  data decrypted but not JSON: {e} [body omitted]");
                     }
                     v
                 }
@@ -799,31 +794,38 @@ pub fn obj(pairs: &[(&str, Value)]) -> Value {
 }
 
 /// Strip anything that could be a credential before a URL lands in a dump file.
-pub fn redact_url(url: &str) -> String {
-    const SENSITIVE: &[&str] = &[
-        "password", "passw", "zpw_sek", "zpw_enk", "cookie", "token", "signkey", "params", "imei",
-    ];
-    let Some((base, query)) = url.split_once('?') else {
-        return url.to_string();
-    };
-    let cleaned: Vec<String> = query
-        .split('&')
-        .map(|kv| {
-            let key = kv.split('=').next().unwrap_or("").to_ascii_lowercase();
-            if SENSITIVE.iter().any(|s| key.contains(s)) {
-                format!("{}=<redacted>", kv.split('=').next().unwrap_or(""))
-            } else {
-                kv.to_string()
-            }
-        })
-        .collect();
-    format!("{base}?{}", cleaned.join("&"))
+pub fn redact_url(raw: &str) -> String {
+    let Ok(mut url) = reqwest::Url::parse(raw) else { return "<invalid-url>".into(); };
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_fragment(None);
+    if url.query().is_some() { url.set_query(Some("redacted")); }
+    url.to_string()
 }
 
-/// Redact a sensitive secret string, showing at most the first 8 characters followed by `…<redacted>`.
-pub fn redact_secret(s: &str) -> String {
-    let prefix: String = s.chars().take(8).collect();
-    format!("{prefix}…<redacted>")
+/// Never reveal even a prefix: short tokens and identifiers are secrets too.
+pub fn redact_secret(_: &str) -> String { "<redacted>".into() }
+
+/// Credential-bearing requests must use TLS and an exact Zalo domain boundary.
+pub fn trusted_zalo_url(raw: &str, websocket: bool) -> bool {
+    let Ok(url) = reqwest::Url::parse(raw) else { return false; };
+    if url.scheme() != if websocket { "wss" } else { "https" }
+        || !url.username().is_empty() || url.password().is_some()
+        || url.fragment().is_some() || url.port_or_known_default() != Some(443) {
+        return false;
+    }
+    url.host_str().map(|host| {
+        ["zalo.me", "zaloapp.com"].iter().any(|domain| {
+            host == *domain || host.strip_suffix(domain).is_some_and(|prefix| prefix.ends_with('.'))
+        })
+    }).unwrap_or(false)
+}
+
+pub fn require_trusted_zalo_url(url: &str, websocket: bool) -> Result<()> {
+    if !trusted_zalo_url(url, websocket) {
+        bail!("Từ chối gửi thông tin phiên tới địa chỉ không thuộc Zalo hoặc không dùng TLS");
+    }
+    Ok(())
 }
 
 pub fn urlencode(s: &str) -> String {    let mut out = String::with_capacity(s.len() * 3);
@@ -857,6 +859,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rejects_credential_exfiltration_urls() {
+        for raw in ["https://chat.zalo.me", "https://wpa.zaloapp.com/api/test", "https://tt-chat3-wpa.api.zaloapp.com:443/api"] {
+            assert!(trusted_zalo_url(raw, false), "{raw}");
+        }
+        for raw in ["http://chat.zalo.me", "https://zalo.me.attacker.test", "https://evilzalo.me",
+            "https://zaloapp.com@attacker.test", "https://user:pass@chat.zalo.me", "https://127.0.0.1",
+            "https://chat.zalo.me:8443", "not a URL zalo.me", "https://chat.zalo.me/#secret", "ws://ws1-msg.chat.zalo.me"] {
+            assert!(!trusted_zalo_url(raw, false), "{raw}");
+        }
+        assert!(trusted_zalo_url("wss://ws1-msg.chat.zalo.me/?test=1", true));
+        assert!(!trusted_zalo_url("wss://ws1-msg.chat.zalo.me.evil.test", true));
+        assert!(!trusted_zalo_url("ws://ws1-msg.chat.zalo.me", true));
+    }
+
+    #[tokio::test]
+    async fn refuses_untrusted_requests_before_network_or_upload() {
+        let s = Session::new(false, false, false).unwrap();
+        let target = "http://127.0.0.1:9/collect";
+        let err = s.get(target).await.unwrap_err().to_string();
+        assert!(err.contains("Từ chối"));
+        assert!(s.post_multipart(target, "file", "test.txt", "text/plain", b"secret").await.unwrap_err().to_string().contains("Từ chối"));
+    }
+
+    #[test]
+    fn never_sets_cookies_on_untrusted_saved_endpoints() {
+        use reqwest::cookie::CookieStore;
+        let mut s = Session::new(false, false, false).unwrap();
+        s.domains.chat = "https://collector.example".into();
+        s.set_zpw_sek("private-cookie".into());
+        assert!(s.jar.cookies(&reqwest::Url::parse("https://collector.example").unwrap()).is_none());
+        assert!(s.jar.cookies(&reqwest::Url::parse("https://chat.zalo.me").unwrap()).is_some());
+    }
+
+    #[test]
+    fn redacts_all_query_fields_userinfo_and_fragment() {
+        assert_eq!(redact_url("https://user:secret@chat.zalo.me/api?unknown_secret=abc&%74oken=xyz#private"),
+            "https://chat.zalo.me/api?redacted");
+        assert_eq!(redact_url("invalid token=secret"), "<invalid-url>");
+    }
+
+    #[test]
     fn session_new_initializes_zpw_sek_and_headers() {
         let s = Session::new(false, false, false).unwrap();
         assert!(s.zpw_sek.is_none());
@@ -873,9 +916,9 @@ mod tests {
     }
 
     #[test]
-    fn redact_secret_truncates_to_eight_chars() {
-        assert_eq!(redact_secret("1234567890abcdef"), "12345678…<redacted>");
-        assert_eq!(redact_secret("short"), "short…<redacted>");
-        assert_eq!(redact_secret(""), "…<redacted>");
+    fn redact_secret_never_reveals_prefixes() {
+        assert_eq!(redact_secret("1234567890abcdef"), "<redacted>");
+        assert_eq!(redact_secret("short"), "<redacted>");
+        assert_eq!(redact_secret(""), "<redacted>");
     }
 }

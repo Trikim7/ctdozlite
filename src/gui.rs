@@ -272,7 +272,7 @@ impl AppSettings {
 
     fn save(&self) {
         if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write("app_settings.json", json);
+            let _ = crate::storage::atomic_write(std::path::Path::new("app_settings.json"), json.as_bytes());
         }
     }
 }
@@ -431,7 +431,7 @@ impl ZaloGuiApp {
             })
             .unwrap_or_default();
 
-        let mut threads = if initial_threads.is_empty() {
+        let mut threads = if !is_logged_in { Vec::new() } else if initial_threads.is_empty() {
             crate::chat::load_threads_cache()
         } else {
             let mut cached = crate::chat::load_threads_cache();
@@ -457,9 +457,11 @@ impl ZaloGuiApp {
             }
         }
         crate::chat::deduplicate_threads(&mut threads, None);
-        crate::store::load_history_into_threads("zalo_history.db", &mut threads, 200);
-        crate::chat::deduplicate_threads(&mut threads, None);
-        crate::chat::save_threads_cache(&threads);
+        if is_logged_in {
+            crate::store::load_history_into_threads("zalo_history.db", &mut threads, 200);
+            crate::chat::deduplicate_threads(&mut threads, None);
+            crate::chat::save_threads_cache(&threads);
+        }
 
         let selected_thread_index = threads
             .iter()
@@ -1153,6 +1155,12 @@ impl eframe::App for ZaloGuiApp {
 
         Self::handle_frameless_resize(ctx);
         self.render_custom_title_bar(ctx, &pal);
+        if self.is_logged_in && crate::logger::session_storage_failed() {
+            egui::TopBottomPanel::top("session_storage_warning").show(ctx, |ui| {
+                ui.colored_label(egui::Color32::YELLOW,
+                    "Không lưu được phiên an toàn. Bạn sẽ cần đăng nhập lại sau khi đóng ứng dụng. Hãy mở khóa kho mật khẩu hệ điều hành.");
+            });
+        }
         // Dev Inspector Panel
         if self.dev_mode && self.dev_panel_open {
             egui::TopBottomPanel::bottom("dev_inspector")

@@ -43,3 +43,6 @@ __pycache__/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Synchronization file for encrypted sessions (contains no credentials)
+session*.json.lock

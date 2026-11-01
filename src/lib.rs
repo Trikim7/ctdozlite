@@ -10,6 +10,8 @@ pub mod media;
 pub mod param_cipher;
 pub mod qr;
 pub mod session;
+pub mod secure_session;
+pub mod storage;
 pub mod socket;
 pub mod store;
 pub mod tui;

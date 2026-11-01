@@ -3,7 +3,7 @@
 //! In Dev mode (`--dev`), logs raw decrypted payloads, endpoint metrics, and provides
 //! a diagnostic scanner. In Production mode, logs and dev panels are hidden and sanitized.
 
-use std::sync::{Arc, Mutex, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex};
 
 #[derive(Debug, Clone)]
 pub struct LogEntry {
@@ -52,15 +52,30 @@ impl Default for LoggerState {
     }
 }
 
-pub static LOGGER: LazyLock<Arc<Mutex<LoggerState>>> = LazyLock::new(|| {
-    Arc::new(Mutex::new(LoggerState::default()))
-});
+pub static LOGGER: LazyLock<Arc<Mutex<LoggerState>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(LoggerState::default())));
 
 /// Initialize logging configuration.
 pub fn init(dev_mode: bool) {
     if let Ok(mut state) = LOGGER.lock() {
         state.dev_mode = dev_mode;
     }
+}
+
+/// Raw diagnostic payloads can include credentials, message content and call keys.
+/// Developer UI alone never opts into recording those values.
+static SESSION_STORAGE_FAILED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_session_storage_failed(failed: bool) {
+    SESSION_STORAGE_FAILED.store(failed, std::sync::atomic::Ordering::Relaxed);
+}
+pub fn session_storage_failed() -> bool {
+    SESSION_STORAGE_FAILED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn sensitive_logging_enabled() -> bool {
+    std::env::var("CTDOZLITE_SENSITIVE_LOGS").ok().as_deref() == Some("1")
 }
 
 pub fn is_dev_mode() -> bool {
@@ -95,13 +110,21 @@ pub fn log_request(
             id: state.counter,
             timestamp: time_str,
             method: method.to_string(),
-            url: url.to_string(),
+            url: crate::session::redact_url(url),
             status,
             latency_ms,
-            payload_preview: payload_preview.to_string(),
-            decrypted_preview: decrypted_preview.map(str::to_string),
+            payload_preview: if sensitive_logging_enabled() {
+                payload_preview.to_string()
+            } else {
+                "<omitted>".into()
+            },
+            decrypted_preview: if sensitive_logging_enabled() {
+                decrypted_preview.map(str::to_string)
+            } else {
+                None
+            },
             is_error,
-            error_msg: error_msg.map(str::to_string),
+            error_msg: error_msg.map(|_| "Request failed (sensitive details omitted)".into()),
         };
 
         state.entries.push(entry);
@@ -135,7 +158,11 @@ pub fn log_error(context: &str, err: &str) {
             payload_preview: String::new(),
             decrypted_preview: None,
             is_error: true,
-            error_msg: Some(err.to_string()),
+            error_msg: Some(if sensitive_logging_enabled() {
+                err.to_string()
+            } else {
+                "Operation failed (sensitive details omitted)".into()
+            }),
         };
 
         state.entries.push(entry);
@@ -209,7 +236,8 @@ pub fn scan_logs() -> Vec<ScanFinding> {
                     level: FindingLevel::Warning,
                     title: "Thiếu cookie phiên (600 zpw_sek not found)".into(),
                     detail: format!("Endpoint {} yêu cầu cookie phiên xác thực.", e.url),
-                    suggestion: "Đảm bảo quét QR hoặc đăng nhập mật khẩu đã hoàn tất trước khi gọi.".into(),
+                    suggestion:
+                        "Đảm bảo quét QR hoặc đăng nhập mật khẩu đã hoàn tất trước khi gọi.".into(),
                 });
             }
         }
@@ -219,8 +247,11 @@ pub fn scan_logs() -> Vec<ScanFinding> {
         findings.push(ScanFinding {
             level: FindingLevel::Info,
             title: "Trạng thái giao thức hoạt động tốt".into(),
-            detail: format!("Đã quét {} requests, toàn bộ phản hồi mã thành công (200 OK / error_code 0).", entries.len()),
-            suggestion: "Không phát hiện lỗi mã hoá hay rò rỉ giao thức.".into(),
+            detail: format!(
+                "Đã quét {} requests, toàn bộ phản hồi mã thành công (200 OK / error_code 0).",
+                entries.len()
+            ),
+            suggestion: "Kết quả này chỉ phản ánh mã phản hồi, không phải kiểm tra an toàn dữ liệu.".into(),
         });
     }
 
@@ -249,7 +280,23 @@ mod tests {
         assert!(!entries.is_empty());
         let last = entries.last().unwrap();
         assert_eq!(last.url, "test_context");
-        assert_eq!(last.error_msg.as_deref(), Some("test_error_message"));
+        assert!(last.error_msg.is_some());
         assert!(last.is_error);
+        log_request(
+            "POST",
+            "https://chat.zalo.me/api?token=private-cookie",
+            Some(200),
+            1,
+            "password=private-password",
+            Some("private-response"),
+            None,
+        );
+        let entries = get_entries();
+        let last = entries.last().unwrap();
+        assert!(!last.url.contains("private-cookie"));
+        if !sensitive_logging_enabled() {
+            assert_eq!(last.payload_preview, "<omitted>");
+            assert!(last.decrypted_preview.is_none());
+        }
     }
 }

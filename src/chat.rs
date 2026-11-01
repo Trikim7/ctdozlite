@@ -341,7 +341,7 @@ pub fn load_threads_cache() -> Vec<Thread> {
 /// Persist conversations and message history locally so they survive app restarts.
 pub fn save_threads_cache(threads: &[Thread]) {
     if let Ok(text) = serde_json::to_string_pretty(threads) {
-        let _ = std::fs::write("threads_cache.json", text);
+        let _ = crate::storage::atomic_write(std::path::Path::new("threads_cache.json"), text.as_bytes());
     }
 }
 

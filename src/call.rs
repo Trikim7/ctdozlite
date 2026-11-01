@@ -492,6 +492,7 @@ async fn voicecall_get(s: &Session, endpoint_path: &str, payload: &Value) -> Res
 /// The trace contains decrypted signaling payloads (call ids, session ids, RTP addresses),
 /// so treat `call_trace.log` like `session.json`: never commit it.
 pub fn trace_line(tag: &str, body: impl AsRef<str>) {
+    if !crate::logger::sensitive_logging_enabled() { return; }
     use std::io::Write;
     let body = body.as_ref();
     let ts = crate::login::unix_now();

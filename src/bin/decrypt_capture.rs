@@ -15,8 +15,8 @@ use serde_json::Value;
 use zalo_rust::crypto::{decode_aes, parse_secret_key};
 
 fn candidate_keys(session_path: &str) -> Result<Vec<(String, Vec<u8>)>> {
-    let text = std::fs::read_to_string(session_path)?;
-    let saved: Value = serde_json::from_str(&text)?;
+    let session = zalo_rust::secure_session::load(std::path::Path::new(session_path))?;
+    let saved: Value = serde_json::to_value(session)?;
     let mut out: Vec<(String, Vec<u8>)> = Vec::new();
     let mut seen: BTreeSet<Vec<u8>> = BTreeSet::new();
     let mut push = |label: &str, k: Vec<u8>, out: &mut Vec<(String, Vec<u8>)>| {

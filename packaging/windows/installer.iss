@@ -1,7 +1,7 @@
 #define MyAppName "ctdozlite"
-#define MyAppVersion "0.0.1"
+#define MyAppVersion "0.1.0"
 #define MyAppPublisher "ctdoteam1110"
-#define MyAppURL "https://github.com/ctdoteam1110/ctdozlite"
+#define MyAppURL "https://github.com/Trikim7/ctdozlite"
 #define MyAppExeName "zalo-rust.exe"
 
 [Setup]

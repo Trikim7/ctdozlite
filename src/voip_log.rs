@@ -35,6 +35,7 @@ pub const STAT_INTERVAL: Duration = Duration::from_secs(5);
 static FILE_LOCK: Mutex<()> = Mutex::new(());
 
 fn log_path() -> Option<String> {
+    if !crate::logger::sensitive_logging_enabled() { return None; }
     match std::env::var("ZALO_VOIP_LOG") {
         Ok(v) if v.eq_ignore_ascii_case("off") || v == "0" => None,
         Ok(v) if !v.trim().is_empty() => Some(v),
