@@ -2703,6 +2703,11 @@ impl ZaloGuiApp {
                         }
                     }
 
+                    if let Some(error)=self.send_error.clone() {
+                        egui::Frame::none().fill(pal.bg_elevated).inner_margin(8.0).show(ui,|ui| {
+                            ui.horizontal_wrapped(|ui| {ui.colored_label(Color32::from_rgb(240,110,100),error);if ui.small_button("Đóng").clicked(){self.send_error=None;}});
+                        });
+                    }
                     // 4. Bottom Message Composer Bar (Compact Icon Actions + Spacious Input + Padded Send Button)
                     let composer_frame = egui::Frame::none()
                         .fill(pal.bg_sidebar)

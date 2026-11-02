@@ -367,6 +367,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                         }
                         WorkerCmd::SendClipboardAttachments {to_id,is_group,caption,files} => {
                             let shared=session.clone();let tx=gui_tx.clone();let ctx=egui_ctx.clone();
+                            let _=tx.send(GuiEvent::AttachmentUploading);ctx.request_repaint();
                             tokio::spawn(async move {
                                 let s=shared.lock().await.clone();
                                 for (index,file) in files.into_iter().enumerate() {
@@ -1530,6 +1531,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                     .and_then(|n| n.to_str())
                                     .unwrap_or("tập tin")
                                     .to_string();
+                                let _=gui_tx_clone.send(GuiEvent::AttachmentUploading);
                                 let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(format!(
                                     "⏳ Đang tải lên và gửi '{fname}'…"
                                 )));

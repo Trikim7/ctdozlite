@@ -1076,6 +1076,7 @@ pub async fn poll_voip_controls(s: &Session, state: &mut CtrlPollState) -> Resul
         // discard historical replay events from previous sessions.
         return Ok(Vec::new());
     }
+    if let Some(login)=s.login.as_ref(){crate::attachment_events::observe(&login.uin,data_node);}
     let events = extract_voip_controls(data_node);
     if !events.is_empty() {
         trace_line(

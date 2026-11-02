@@ -629,11 +629,33 @@ fn md5_hex_bytes(bytes: &[u8]) -> String {
     })
 }
 
+/// Require an acknowledged server response; transport success alone is not a sent file.
+fn attachment_data<'a>(response: &'a Value, stage: &str, upload: bool) -> Result<&'a Value> {
+    let code=response.get("error_code").and_then(Value::as_i64)
+        .ok_or_else(||anyhow::anyhow!("{stage}: phản hồi không hợp lệ hoặc chưa giải mã được"))?;
+    anyhow::ensure!(code==0 || (upload && matches!(code,1|220)),"{stage}: máy chủ từ chối (mã {code})");
+    response.get("data").filter(|d|d.is_object())
+        .ok_or_else(||anyhow::anyhow!("{stage}: máy chủ chưa xác nhận dữ liệu"))
+}
+fn attachment_message_id(response:&Value)->Result<String> {
+    let data=attachment_data(response,"Gửi tệp",false)?;
+    pick_str(data,&["msgId","messageId"]).filter(|id|!id.is_empty() && id!="0")
+        .ok_or_else(||anyhow::anyhow!("Máy chủ chưa xác nhận mã tin nhắn; tệp chưa được coi là đã gửi"))
+}
+fn attachment_upload_data(response:&Value,image:bool)->Result<&Value> {
+    let data=attachment_data(response,"Tải tệp lên",true)?;
+    let id=if image {pick_str(data,&["photoId","clientFileId"])} else {pick_str(data,&["fileId","clientFileId"])};
+    anyhow::ensure!(id.is_some_and(|id|!id.is_empty() && id!="0" && id!="-1"),"Tải tệp lên chưa hoàn tất: thiếu mã tệp");
+    let url=if image {pick_str(data,&["normalUrl","hdUrl","oriUrl","url"])} else {pick_str(data,&["fileUrl","url","normalUrl"])};
+    anyhow::ensure!(url.as_deref().is_some_and(|u|crate::inline_video::trusted_media_url(u)),"Tải tệp lên chưa hoàn tất: thiếu đường dẫn tệp hợp lệ");
+    Ok(data)
+}
+
 /// Upload and send a photo, video, or general file attachment to a 1-1 or group conversation.
 ///
 /// Implements Zalo PC 26.10.11's two-stage chunked upload (`photo_original/upload` -> `photo_original/send`
-/// for images; `asyncfile/upload` -> `asyncfile/msg` for videos/files) with automatic fallback to
-/// single-shot `message/photo` (`11152`) and `message/sharefile_full` (`11146`).
+/// for images; `asyncfile/upload` -> `asyncfile/msg` for videos/files).
+/// A failed acknowledgement never becomes a fabricated local success or a second send.
 pub async fn send_attachment(
     s: &Session,
     to_id: &str,
@@ -644,6 +666,9 @@ pub async fn send_attachment(
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
+    // All input routes share one permit, bounding aggregate attachment memory use.
+    static UPLOAD_SLOT: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    let _permit=UPLOAD_SLOT.get_or_init(||tokio::sync::Semaphore::new(1)).acquire().await?;
     // Bound the existing in-memory multipart encoder even if a file grows after metadata check.
     const MAX_ATTACHMENT:usize=128*1024*1024;
     let file=std::fs::File::open(file_path)?;
@@ -696,13 +721,6 @@ pub async fn send_attachment(
         let (width, height) = image::load_from_memory(&file_bytes)
             .map(|img| (img.width(), img.height()))
             .unwrap_or((800, 600));
-        let mime = match ext.as_str() {
-            "png" => "image/png",
-            "webp" => "image/webp",
-            "gif" => "image/gif",
-            "bmp" => "image/bmp",
-            _ => "image/jpeg",
-        };
         let upload_ep = if is_group {
             "/api/group/photo_original/upload"
         } else {
@@ -732,12 +750,13 @@ pub async fn send_attachment(
                 s.common_params()
             );
             let up_raw = s
-                .post_multipart(&url, "chunkContent", &file_name, mime, chunk)
+                .post_multipart(&url, "chunkContent", &file_name, "application/octet-stream", chunk)
                 .await?;
             last_up_dec = s.maybe_decrypt(up_raw, s.session_key_bytes()).await;
+            attachment_data(&last_up_dec,"Tải tệp lên",true)?;
         }
 
-        let data_node = last_up_dec.get("data").unwrap_or(&last_up_dec);
+        let data_node = attachment_upload_data(&last_up_dec,true)?;
         let photo_id = pick_str(data_node, &["photoId", "clientFileId"]);
         let normal_url = pick_str(data_node, &["normalUrl", "hdUrl", "oriUrl", "url"]).unwrap_or_default();
         let hd_url = pick_str(data_node, &["hdUrl", "normalUrl", "oriUrl"]).unwrap_or_else(|| normal_url.clone());
@@ -775,45 +794,8 @@ pub async fn send_attachment(
             let url = format!("{file_host}{send_ep}?{}", s.common_params());
             let r = s.post_form(&url, format!("params={params}")).await?;
             s.maybe_decrypt(r, s.session_key_bytes()).await
-        } else {
-            // Fallback: single-shot `/api/message/photo` or `/api/group/sendpt`
-            let single_ep = if is_group {
-                "/api/group/sendpt"
-            } else {
-                "/api/message/photo"
-            };
-            let mut body_obj = serde_json::Map::new();
-            body_obj.insert("clientId".into(), json!(client_id));
-            body_obj.insert("desc".into(), json!(caption));
-            body_obj.insert("width".into(), json!(width));
-            body_obj.insert("height".into(), json!(height));
-            body_obj.insert("imei".into(), json!(s.imei));
-            if is_group {
-                body_obj.insert("grid".into(), json!(clean_target));
-                body_obj.insert("visibility".into(), json!(0));
-            } else {
-                body_obj.insert("toid".into(), json!(clean_target));
-            }
-            let params = s.encoded_params(&Value::Object(body_obj))?;
-            let url = format!(
-                "{file_host}{single_ep}?{}&params={params}&type={target_type}",
-                s.common_params()
-            );
-            let r = s
-                .post_multipart(&url, "fileContent", &file_name, mime, &file_bytes)
-                .await?;
-            s.maybe_decrypt(r, s.session_key_bytes()).await
-        };
-
-        if let Some(code) = send_resp.get("error_code").and_then(Value::as_i64) {
-            if code != 0 {
-                let msg = send_resp
-                    .get("error_message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown");
-                anyhow::bail!("server error {code}: {msg}");
-            }
-        }
+        } else { anyhow::bail!("Tải ảnh lên chưa hoàn tất"); };
+        let confirmed_msg_id=attachment_message_id(&send_resp)?;
 
         let final_thumb = if !thumb_url.is_empty() {
             thumb_url
@@ -831,10 +813,7 @@ pub async fn send_attachment(
         let cache_key = format!("thumb_{}", crate::crypto::md5_hex(&final_thumb));
         let _ = std::fs::write(format!("stickers_cache/{cache_key}.png"), &file_bytes);
 
-        let msg_id = send_resp
-            .get("data")
-            .and_then(|d| pick_str(d, &["msgId", "cliMsgId"]))
-            .unwrap_or_else(|| format!("out_{client_id}"));
+        let msg_id = confirmed_msg_id;
         let now_str = crate::ui::clock();
         let display_text = if !caption.trim().is_empty() {
             caption.trim().to_string()
@@ -862,20 +841,10 @@ pub async fn send_attachment(
         return Ok((send_resp, cm));
     }
 
-    // Video / Audio / Document / Archive upload (`asyncfile/upload` -> `asyncfile/msg`, fallback `sharefile_full`)
-    let mime = match ext.as_str() {
-        "mp4" => "video/mp4",
-        "mov" => "video/quicktime",
-        "mkv" => "video/x-matroska",
-        "webm" => "video/webm",
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        "pdf" => "application/pdf",
-        "zip" => "application/zip",
-        "txt" | "md" | "log" => "text/plain",
-        _ => "application/octet-stream",
-    };
+    // Video / Audio / Document / Archive upload; await asynchronous file_done before sending.
     let checksum = md5_hex_bytes(&file_bytes);
+    // Subscribe before uploading: file_done can arrive before the HTTP response.
+    let mut completions=crate::attachment_events::subscribe();
     let upload_ep = if is_group {
         "/api/group/asyncfile/upload"
     } else {
@@ -903,21 +872,26 @@ pub async fn send_attachment(
             "{file_host}{upload_ep}?{}&params={params}&type={target_type}",
             s.common_params()
         );
-        if let Ok(up_raw) = s
-            .post_multipart(&url, "chunkContent", &file_name, mime, chunk)
-            .await
-        {
-            last_up_dec = s.maybe_decrypt(up_raw, s.session_key_bytes()).await;
-        } else {
-            break;
-        }
+        let up_raw=s.post_multipart(&url,"chunkContent",&file_name,"application/octet-stream",chunk).await?;
+        last_up_dec=s.maybe_decrypt(up_raw,s.session_key_bytes()).await;
+        attachment_data(&last_up_dec,"Tải tệp lên",true)?;
     }
 
-    let data_node = last_up_dec.get("data").unwrap_or(&last_up_dec);
+    drop(file_bytes); // Do not retain a large file while waiting for the completion event.
+    let mut completed_data=attachment_data(&last_up_dec,"Tải tệp lên",true)?.clone();
+    if pick_str(&completed_data,&["fileUrl","url"]).is_none() {
+        let id=pick_str(&completed_data,&["fileId"]).filter(|id|id!="-1" && id!="0")
+            .ok_or_else(||anyhow::anyhow!("Zalo chưa xác nhận mã tệp tải lên"))?;
+        let owner=&s.login.as_ref().unwrap().uin;
+        let url=crate::attachment_events::wait(&mut completions,owner,&id,std::time::Duration::from_secs(90)).await?;
+        completed_data["fileUrl"]=json!(url);
+    }
+    last_up_dec["data"]=completed_data;
+    let data_node = attachment_upload_data(&last_up_dec,false)?;
     let file_id = pick_str(data_node, &["fileId", "clientFileId"]);
     let file_url = pick_str(data_node, &["fileUrl", "url", "normalUrl"]).unwrap_or_default();
 
-    let mut send_resp = if let Some(fid) = file_id {
+    let send_resp = if let Some(fid) = file_id {
         let msg_ep = if is_group {
             "/api/group/asyncfile/msg"
         } else {
@@ -952,38 +926,7 @@ pub async fn send_attachment(
         json!({ "error_code": -1 })
     };
 
-    if send_resp.get("error_code").and_then(Value::as_i64).unwrap_or(-1) != 0 {
-        // Fallback to single-shot `/api/message/sharefile_full` or `/api/group/sharefile_full`
-        let share_ep = if is_group {
-            "/api/group/sharefile_full"
-        } else {
-            "/api/message/sharefile_full"
-        };
-        let body = if is_group {
-            obj(&[("grid", json!(clean_target)), ("clientId", json!(client_id))])
-        } else {
-            obj(&[("toid", json!(clean_target)), ("clientId", json!(client_id))])
-        };
-        let params = s.encoded_params(&body)?;
-        let url = format!(
-            "{file_host}{share_ep}?{}&params={params}&type={target_type}",
-            s.common_params()
-        );
-        let r = s
-            .post_multipart(&url, "fileContent", &file_name, mime, &file_bytes)
-            .await?;
-        send_resp = s.maybe_decrypt(r, s.session_key_bytes()).await;
-    }
-
-    if let Some(code) = send_resp.get("error_code").and_then(Value::as_i64) {
-        if code != 0 {
-            let msg = send_resp
-                .get("error_message")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            anyhow::bail!("server error {code}: {msg}");
-        }
-    }
+    let confirmed_msg_id=attachment_message_id(&send_resp)?;
 
     let final_url = if !file_url.is_empty() {
         file_url
@@ -993,10 +936,7 @@ pub async fn send_attachment(
             .and_then(|d| pick_str(d, &["fileUrl", "url", "href"]))
             .unwrap_or_default()
     };
-    let msg_id = send_resp
-        .get("data")
-        .and_then(|d| pick_str(d, &["msgId", "cliMsgId"]))
-        .unwrap_or_else(|| format!("out_{client_id}"));
+    let msg_id = confirmed_msg_id;
     let kind_label = if is_video { "Video" } else { "Tập tin" };
     let display_text = if !caption.trim().is_empty() {
         caption.trim().to_string()
@@ -4106,6 +4046,22 @@ pub async fn find_user_by_phone(s: &Session, raw_phone: &str) -> Result<PhoneLoo
         status,
         friendship,
     })
+}
+
+#[cfg(test)]
+mod attachment_response_tests {
+    use super::*;
+    #[test]fn false_success_cannot_become_a_sent_message(){
+        for value in [json!({"error_code":0,"data":null}),json!({"error_code":0,"data":{}}),json!({"error_code":0,"data":"encrypted"}),json!({"error_code":114,"data":{"msgId":"123"}}),json!({"data":{"msgId":"123"}})] {
+            assert!(attachment_message_id(&value).is_err());
+        }
+        assert_eq!(attachment_message_id(&json!({"error_code":0,"data":{"msgId":123}})).unwrap(),"123");
+    }
+    #[test]fn upload_requires_url_and_matching_file_type(){
+        assert!(attachment_upload_data(&json!({"error_code":0,"data":{"fileId":42,"finished":1}}),false).is_err());
+        assert!(attachment_upload_data(&json!({"error_code":0,"data":{"fileId":42,"url":"https://evil.test/a"}}),false).is_err());
+        assert!(attachment_upload_data(&json!({"error_code":1,"data":{"fileId":42,"url":"https://files.zalo.me/a"}}),false).is_ok());
+    }
 }
 
 #[cfg(test)]

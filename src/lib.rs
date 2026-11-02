@@ -31,3 +31,5 @@ pub mod call_support;
 pub mod clipboard;
 
 pub mod nicknames;
+
+pub mod attachment_events;

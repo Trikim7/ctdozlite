@@ -62,3 +62,7 @@ Người dùng yêu cầu tiếp tục dùng REA đối chiếu UI gốc, sửa 
 Đã tái hiện và sửa winit X11 bỏ Update sau commit của Bamboo; probe native với Bamboo và Bamboo::Us hiện cả từ 2/3 trước Space, Enter chốt dấu không gửi. Giữ nguyên cấu hình/engine gốc sau thử. Dán ảnh/tệp/văn bản đọc qua worker, có preview/hủy, lifetime tệp tạm riêng, ID hội thoại để bỏ khi chuyển nơi, giới hạn clipboard/upload nhằm giữ RAM. xclip được cài user-local. Đã thử native Ctrl+V ảnh, Shift+Insert hai tệp tên Unicode và văn bản; không gửi tin thử, khôi phục clipboard theo định dạng chính. Đã sửa thêm preview quá rộng đẩy nút Gửi ra ngoài viewport.
 
 Alias API đọc được 35 mục, 32 khớp hội thoại; cache mã hóa roundtrip đạt. Hiển thị theo map riêng thay vì ghi đè canonical Thread.name/ID, tự làm mới. 139 test thư viện đạt, 4 ignore; release Linux build đạt. Xem CLIPBOARD_IME_NICKNAMES.md cho giới hạn và bằng chứng; các việc Android/media URL trước đó vẫn chưa hoàn tất.
+
+## 02/11/2026 — 0.1.7 gửi tệp
+
+Đã nối file_done qua socket/polling, chờ URL trước asyncfile/msg; xác nhận msgId, lỗi rõ trong hội thoại, một upload tại một thời điểm. 144 test đạt/4 ignore. Người dùng cho phép gửi một tệp văn bản thử vào Cloud: server error_code 0 + msgId + HTTPS URL; bản cài đọc lại từ lịch sử thấy Đã nhận. Native picker mở và clipboard file preview/hủy đạt, không gửi GUI vào chat người khác. Xem docs/ATTACHMENT_SEND.md.

@@ -75,6 +75,7 @@ pub enum GuiEvent {
         cate_id: u64,
         sticker_type: u32,
     },
+    AttachmentUploading,
     AttachmentSent {
         thread_id: String,
         msg: ChatMessage,
@@ -350,6 +351,7 @@ pub struct ZaloGuiApp {
 
     info_drawer_open: bool,
     profile_menu_open: bool,
+    send_error: Option<String>,
     toast_notice: Option<(String, std::time::Instant)>,
     phone_modal_open: bool,
     phone_modal_input: String,
@@ -535,6 +537,7 @@ impl ZaloGuiApp {
             status_msg: "Trực tuyến · Sẵn sàng".into(),
             info_drawer_open: true,
             profile_menu_open: false,
+            send_error: None,
             toast_notice: None,
             phone_modal_open: false,
             phone_modal_input: String::new(),
@@ -858,6 +861,7 @@ impl ZaloGuiApp {
                     }
                     self.status_msg = format!("Đã gửi nhãn dán lúc {}", crate::ui::clock());
                 }
+                GuiEvent::AttachmentUploading => {self.send_error=None;self.show_toast("Đang tải tệp lên Zalo…");}
                 GuiEvent::AttachmentSent { thread_id, msg } => {
                     if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
                         t.preview = msg.text.clone();
@@ -868,7 +872,7 @@ impl ZaloGuiApp {
                         }
                         self.persist_threads_async();
                     }
-                    self.status_msg = format!("Đã gửi đính kèm lúc {}", crate::ui::clock());
+                    self.show_toast(format!("Đã gửi tệp lúc {}", crate::ui::clock()));
                 }
                 GuiEvent::QuoteSent {
                     thread_id,
@@ -1142,7 +1146,8 @@ impl ZaloGuiApp {
                     if self.input_message.is_empty() && !text.is_empty() {
                         self.input_message = text;
                     }
-                    self.status_msg = format!("Không gửi được: {error}");
+                    self.send_error=Some(format!("Không gửi được: {error}"));
+                    self.show_toast(format!("Không gửi được: {error}"));
                 }
                 GuiEvent::CallStateChanged(state) => {
                     if state == "free" {

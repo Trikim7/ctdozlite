@@ -4,6 +4,7 @@
 
 #![allow(dead_code)]
 
+mod attachment_events;
 mod audio;
 mod call;
 mod chat;

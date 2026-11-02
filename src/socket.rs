@@ -558,6 +558,9 @@ async fn run_once(
                         .await;
                     trace(format!("-> pull next {qkey} {id}"));
                 }
+                if matches!(cmd,CMD_CTRL_PUSH_CTRL|CMD_CTRL_PULL_CTRL) {
+                    if let Some(login)=sess.login.as_ref(){crate::attachment_events::observe(&login.uin,&payload);}
+                }
                 let _ = tx.send(WsEvent { cmd, sub_cmd, version, payload });
             }
         }
