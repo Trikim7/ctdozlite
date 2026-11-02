@@ -34,32 +34,32 @@ pub(super) struct ThemePalette {
 
 impl ThemePalette {
     pub(super) fn dark() -> Self {
-        // Official Atom One Dark (`one-dark-ui` + `one-dark-syntax`) color system
+        // Neutral Zalo-style dark surfaces; official Web bootstrap uses #22262B.
         Self {
             is_dark: true,
-            bg_app: Color32::from_rgb(24, 26, 31),          // #181A1F Activity Bar & Title Bar
-            bg_sidebar: Color32::from_rgb(33, 37, 43),      // #21252B Tree-View / Sidebar / Header
-            bg_chat_canvas: Color32::from_rgb(40, 44, 52),  // #282C34 Atom One Dark Editor Canvas
-            bg_elevated: Color32::from_rgb(44, 49, 58),     // #2C313A Elevated Card / Modal / Popover
-            bg_hover: Color32::from_rgb(50, 56, 66),        // #323842 List Hover Surface
-            bg_selected: Color32::from_rgb(58, 63, 75),     // #3A3F4B Active Selection Row
-            bg_input: Color32::from_rgb(29, 31, 35),        // #1D1F23 Input / Search Well
-            border: Color32::from_rgb(52, 57, 66),          // #343942 Subtle Panel Divider
-            text_primary: Color32::from_rgb(215, 218, 224), // #D7DAE0 Bright Foreground
-            text_secondary: Color32::from_rgb(171, 178, 191), // #ABB2BF Atom @mono-1
-            text_muted: Color32::from_rgb(118, 126, 142),   // #767E8E Atom @mono-3 (readable muted)
-            primary: Color32::from_rgb(82, 139, 255),       // #528BFF Atom UI Accent Blue
-            primary_hover: Color32::from_rgb(97, 175, 239), // #61AFEF Atom @hue-2 Cyan-Blue
-            accent_online: Color32::from_rgb(152, 195, 121), // #98C379 Atom @hue-4 Green
-            danger: Color32::from_rgb(224, 108, 117),       // #E06C75 Atom @hue-5 Coral Red
-            warning: Color32::from_rgb(229, 192, 123),      // #E5C07B Atom @hue-62 Warm Gold
-            bubble_out_bg: Color32::from_rgb(37, 55, 77),   // #25374D Zalo Dark Slate-Navy Outgoing Bubble
-            bubble_out_text: Color32::from_rgb(235, 240, 246), // #EBF0F6
-            bubble_out_meta: Color32::from_rgb(154, 171, 192), // #9AABC0
-            bubble_in_bg: Color32::from_rgb(50, 56, 66),    // #323842 Atom Elevated Incoming Bubble
-            bubble_in_border: Color32::from_rgb(62, 68, 81), // #3E4451 Atom Gutter Border
-            bubble_in_text: Color32::from_rgb(215, 218, 224), // #D7DAE0
-            bubble_in_meta: Color32::from_rgb(142, 150, 165), // #8E96A5
+            bg_app: Color32::from_rgb(24, 26, 31),
+            bg_sidebar: Color32::from_rgb(34, 38, 43),
+            bg_chat_canvas: Color32::from_rgb(25, 28, 33),
+            bg_elevated: Color32::from_rgb(43, 47, 53),
+            bg_hover: Color32::from_rgb(50, 56, 66),
+            bg_selected: Color32::from_rgb(53, 60, 71),
+            bg_input: Color32::from_rgb(29, 31, 35),
+            border: Color32::from_rgb(52, 57, 66),
+            text_primary: Color32::from_rgb(215, 218, 224),
+            text_secondary: Color32::from_rgb(171, 178, 191),
+            text_muted: Color32::from_rgb(118, 126, 142),
+            primary: Color32::from_rgb(59, 142, 255),
+            primary_hover: Color32::from_rgb(85, 155, 255),
+            accent_online: Color32::from_rgb(152, 195, 121),
+            danger: Color32::from_rgb(224, 108, 117),
+            warning: Color32::from_rgb(229, 192, 123),
+            bubble_out_bg: Color32::from_rgb(37, 55, 77),
+            bubble_out_text: Color32::from_rgb(235, 240, 246),
+            bubble_out_meta: Color32::from_rgb(154, 171, 192),
+            bubble_in_bg: Color32::from_rgb(50, 56, 66),
+            bubble_in_border: Color32::from_rgb(62, 68, 81),
+            bubble_in_text: Color32::from_rgb(215, 218, 224),
+            bubble_in_meta: Color32::from_rgb(142, 150, 165),
         }
     }
 
@@ -260,7 +260,8 @@ pub(super) fn paint_user_avatar(
             );
             return;
         }
-        if loading.insert(key.clone()) {
+        let retry= painter.ctx().data(|data|data.get_temp::<std::time::Instant>(Id::new(("avatar_retry",&key))));
+        if retry.is_none_or(|deadline|std::time::Instant::now()>=deadline) && loading.insert(key.clone()) {
             if let Some(tx) = WORKER_TX.get() {
                 let _ = tx.send(WorkerCmd::FetchStickerImage {
                     key,

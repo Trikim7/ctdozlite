@@ -24,3 +24,6 @@ pub mod voip_log;
 pub mod inline_video;
 
 pub mod phone_sync;
+
+pub mod avatar;
+pub mod call_support;

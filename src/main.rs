@@ -132,10 +132,8 @@ async fn main() -> Result<()> {
             ..Default::default()
         };
 
-        let mut initial_threads = if session_restored { chat::load_threads_cache() } else { Vec::new() };
-        if session_restored {
-            store::load_history_into_threads("zalo_history.db", &mut initial_threads, 200);
-        }
+        // The GUI hydrates SQLite once; do not load and merge a second full encrypted cache.
+        let initial_threads = if session_restored { chat::load_threads_cache() } else { Vec::new() };
 
         let app_session = s;
         let sync_phone=args.iter().any(|arg|arg=="--sync-phone");
@@ -255,3 +253,6 @@ async fn main() -> Result<()> {
 mod inline_video;
 
 mod phone_sync;
+
+pub mod avatar;
+pub mod call_support;

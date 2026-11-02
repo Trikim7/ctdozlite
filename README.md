@@ -2,7 +2,14 @@
 
 Bản fork của [ctdoteam1110/ctdozlite](https://github.com/ctdoteam1110/ctdozlite), một Zalo client không chính thức viết bằng Rust với GUI và TUI. Giữ nguyên giấy phép MIT / Apache-2.0 và ghi nhận tác giả gốc.
 
-**Phiên bản mã nguồn của fork: 0.1.4.** Các bản EXE/DEB/DMG từ repository gốc không chứa những sửa đổi dưới đây. Không dùng chúng để đánh giá bản fork.
+**Phiên bản mã nguồn của fork: 0.1.5.** Các bản EXE/DEB/DMG từ repository gốc không chứa những sửa đổi dưới đây. Không dùng chúng để đánh giá bản fork.
+
+## Bản 0.1.5 — cài đặt, avatar và thiết bị gọi
+
+- Khung cài đặt nằm gọn trong cửa sổ, tách vùng menu/nội dung, cuộn độc lập; cửa sổ nhỏ dùng menu chọn mục. Đối chiếu bố cục settings của Zalo Web qua REA; không nhúng client Web vào app.
+- Avatar lấy toàn bộ vùng vuông ở giữa ảnh rồi thu nhỏ 128px, không cắt một mảnh nhỏ khiến mặt bị phóng lớn. Ưu tiên avatar nhóm thay vì ảnh nền; cho phép retry avatar lỗi sau thời gian chờ và kiểm tra redirect media.
+- Kiểm tra micro, loa, Opus, H.264 và camera theo yêu cầu trong cài đặt. Thêm chọn loa/tai nghe sử dụng cho cuộc gọi; danh sách thiết bị được lưu tạm, không quét liên tục.
+- Giữ nguyên giới hạn ảnh và hàng đợi lưu lịch sử của 0.1.4. Không thêm framework, dịch vụ nền hay thư viện nặng. `call_check` chỉ kiểm tra khả năng tại máy, không thực hiện cuộc gọi hoặc ghi âm/quay camera.
 
 ## Bản 0.1.4 — giảm tăng RAM khi mở lịch sử lớn
 

@@ -2,6 +2,7 @@ use super::*;
 
 pub enum WorkerCmd {
     RequestQr,
+    CheckCallSupport,
     LoginPassword {
         phone: String,
         pass: String,
@@ -339,6 +340,11 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
 
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        WorkerCmd::CheckCallSupport => {
+                            let tx=gui_tx.clone();let ctx=egui_ctx.clone();
+                            tokio::task::spawn_blocking(move || {let report=crate::call_support::CallSupport::inspect();let _=tx.send(GuiEvent::CallSupportReady(report));ctx.request_repaint();});
+                        }
+
                         WorkerCmd::CancelHistory => {
                             if let Some(cancel)=phone_cancel.take(){let _=cancel.send(true);}
                             if let Some(task)=history_task.take() {task.abort();}
@@ -1288,14 +1294,16 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                 let cache_path = cache_dir.join(format!("{key}.png"));
 
                                 let private_media=key.starts_with("thumb_");
+                                let is_avatar=key.starts_with("ava_");
                                 let cached=if private_media {None} else {std::fs::read(&cache_path).ok()};
+                                let cached_from_disk=cached.is_some();
                                 let bytes_opt = if let Some(disk_bytes) = cached {
                                     Some(disk_bytes)
                                 } else if !url.starts_with("http://") && !url.starts_with("https://") {
                                     std::fs::read(&url).ok()
                                 } else {
                                     let client = { session_clone.lock().await.clone().http };
-                                    let request=if private_media {crate::inline_video::media_response(&client,&url).await} else {client.get(&url).send().await.map_err(anyhow::Error::from)};
+                                    let request=if private_media || is_avatar {crate::inline_video::media_response(&client,&url).await} else {client.get(&url).send().await.map_err(anyhow::Error::from)};
                                     if let Ok(resp) = request {
                                         if resp.status().is_success() {
                                             if let Ok(b) = crate::inline_video::read_image_bytes(resp).await {
@@ -1317,43 +1325,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                     if let Ok(dyn_img) = crate::inline_video::decode_image(&bytes) {
                                         if !private_media { let _=std::fs::write(&cache_path,&bytes); }
                                         let dyn_img=if private_media && !key.starts_with("thumb_hd_") {dyn_img.thumbnail(640,640)} else {dyn_img};
-                                        let mut rgba = dyn_img.to_rgba8();
-                                        // Apply smooth anti-aliased circular alpha mask for avatar textures (`ava_*`)
-                                        if key.starts_with("ava_") {
-                                            let side = rgba.width().min(rgba.height()).clamp(32, 160);
-                                            let x0 = (rgba.width() - side) / 2;
-                                            let y0 = (rgba.height() - side) / 2;
-                                            let cropped = image::imageops::crop_imm(
-                                                &rgba, x0, y0, side, side,
-                                            )
-                                            .to_image();
-                                            rgba = if side > 128 {
-                                                image::imageops::resize(
-                                                    &cropped,
-                                                    128,
-                                                    128,
-                                                    image::imageops::FilterType::Triangle,
-                                                )
-                                            } else {
-                                                cropped
-                                            };
-                                            let w = rgba.width() as f32;
-                                            let h = rgba.height() as f32;
-                                            let cx = (w - 1.0) * 0.5;
-                                            let cy = (h - 1.0) * 0.5;
-                                            let r = w.min(h) * 0.5;
-                                            for (x, y, px) in rgba.enumerate_pixels_mut() {
-                                                let dx = x as f32 - cx;
-                                                let dy = y as f32 - cy;
-                                                let dist = (dx * dx + dy * dy).sqrt();
-                                                if dist > r {
-                                                    px[3] = 0;
-                                                } else if dist > r - 1.4 {
-                                                    let cov = ((r - dist) / 1.4).clamp(0.0, 1.0);
-                                                    px[3] = (px[3] as f32 * cov) as u8;
-                                                }
-                                            }
-                                        }
+                                        let rgba=if is_avatar {crate::avatar::prepare_avatar(&dyn_img)}else{dyn_img.to_rgba8()};
                                         let size =
                                             [rgba.width() as usize, rgba.height() as usize];
                                         let pixels = rgba.as_flat_samples();
@@ -1370,6 +1342,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                         return;
                                     }
                                 }
+                                if cached_from_disk {let _=std::fs::remove_file(&cache_path);}
                                 let _=gui_tx_clone.send(GuiEvent::ImageFailed {key});ctx_clone.request_repaint();
                             });
                         }

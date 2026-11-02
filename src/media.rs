@@ -22,7 +22,9 @@ const SAMPLE_RATE: u32 = 16000;
 const FRAME_SAMPLES: usize = 320; // 20 ms @ 16 kHz
 
 static SELECTED_MIC_DEVICE: Mutex<String> = Mutex::new(String::new());
+static SELECTED_OUTPUT_DEVICE: Mutex<String> = Mutex::new(String::new());
 static SELECTED_CAMERA_DEVICE: Mutex<String> = Mutex::new(String::new());
+static CACHED_OUTPUTS: Mutex<Option<Vec<String>>> = Mutex::new(None);
 static CACHED_DEVICES: Mutex<Option<(Vec<String>, Vec<String>)>> = Mutex::new(None);
 
 pub fn set_selected_mic_device(name: &str) {
@@ -37,6 +39,14 @@ pub fn set_selected_camera_device(name: &str) {
     }
 }
 
+pub fn set_selected_output_device(name:&str) {if let Ok(mut selected)=SELECTED_OUTPUT_DEVICE.lock(){*selected=name.trim().to_owned();}}
+pub fn list_output_devices()->Vec<String> {
+    if let Ok(cache)=CACHED_OUTPUTS.lock(){if let Some(devices)=cache.as_ref(){return devices.clone();}}
+    let devices=crate::audio::list_output_devices().unwrap_or_default();
+    if let Ok(mut cache)=CACHED_OUTPUTS.lock(){*cache=Some(devices.clone());}
+    devices
+}
+
 pub fn selected_mic_device() -> String {
     SELECTED_MIC_DEVICE.lock().map(|g| g.clone()).unwrap_or_default()
 }
@@ -47,6 +57,7 @@ pub fn selected_camera_device() -> String {
 
 /// Return cached `(mic_devices, camera_devices)` or enumerate once (with `refresh=true` to rescan).
 pub fn list_media_devices(refresh: bool) -> (Vec<String>, Vec<String>) {
+    if refresh {if let Ok(mut cache)=CACHED_OUTPUTS.lock(){*cache=None;}}
     if !refresh {
         if let Ok(g) = CACHED_DEVICES.lock() {
             if let Some(ref cached) = *g {
@@ -1154,7 +1165,9 @@ fn run_media_loop(
             return;
         }
     };
-    let output_dev = match host.default_output_device() {
+    let selected_output=SELECTED_OUTPUT_DEVICE.lock().map(|s|s.clone()).unwrap_or_default();
+    let output=host.output_devices().ok().and_then(|devices|devices.into_iter().find(|d|!selected_output.is_empty()&&d.name().ok().as_deref()==Some(selected_output.as_str()))).or_else(||host.default_output_device());
+    let output_dev = match output {
         Some(d) => d,
         None => {
             eprintln!("media: no output device");

@@ -31,6 +31,8 @@ mod memory;
 use memory::{TextureCache, media_visible};
 mod messages;
 mod modals;
+mod settings;
+use settings::settings_geometry;
 mod stickers;
 mod theme;
 mod worker;
@@ -82,6 +84,7 @@ pub enum GuiEvent {
         image: egui::ColorImage,
         _permit: tokio::sync::OwnedSemaphorePermit,
     },
+    CallSupportReady(crate::call_support::CallSupport),
     InlineVideoReady {url:String,path:tempfile::TempPath},
     InlineVideoFailed {url:String},
     ImageFailed {key:String},
@@ -227,6 +230,7 @@ struct AppSettings {
     enable_sticker_keyword_search: bool,
     // 7. Thiết bị cuộc gọi (Mic & Camera)
     selected_mic_device: String,
+    selected_output_device: String,
     selected_camera_device: String,
 }
 
@@ -271,6 +275,7 @@ impl Default for AppSettings {
             enable_gif_search: true,
             enable_sticker_keyword_search: true,
             selected_mic_device: String::new(),
+            selected_output_device: String::new(),
             selected_camera_device: String::new(),
         }
     }
@@ -382,6 +387,8 @@ pub struct ZaloGuiApp {
     dismissed_link_preview_for: String,
     friend_status_map: HashMap<String, crate::chat::FriendshipStatus>,
     checking_friend_status: HashSet<String>,
+    call_support: Option<crate::call_support::CallSupport>,
+    checking_call_support: bool,
     settings_modal_open: bool,
     settings_tab: SettingsTab,
     settings: AppSettings,
@@ -425,6 +432,7 @@ impl ZaloGuiApp {
         setup_custom_fonts(&cc.egui_ctx);
         let loaded_settings = AppSettings::load();
         crate::media::set_selected_mic_device(&loaded_settings.selected_mic_device);
+        crate::media::set_selected_output_device(&loaded_settings.selected_output_device);
         crate::media::set_selected_camera_device(&loaded_settings.selected_camera_device);
         let dark_mode = loaded_settings.theme_mode != "light";
         if dark_mode {
@@ -455,18 +463,7 @@ impl ZaloGuiApp {
         let mut threads = if !is_logged_in { Vec::new() } else if initial_threads.is_empty() {
             crate::chat::load_threads_cache()
         } else {
-            let mut cached = crate::chat::load_threads_cache();
-            for t in initial_threads {
-                if let Some(c) = cached
-                    .iter_mut()
-                    .find(|c| crate::chat::threads_represent_same_contact(c, &t))
-                {
-                    crate::chat::merge_thread_into(c, t, true);
-                } else {
-                    cached.push(t);
-                }
-            }
-            cached
+            initial_threads
         };
         if let Some(li) = session.login.as_ref() {
             if !li.send2me_id.is_empty() {
@@ -574,6 +571,8 @@ impl ZaloGuiApp {
             dismissed_link_preview_for: String::new(),
             friend_status_map: HashMap::new(),
             checking_friend_status: HashSet::new(),
+            call_support: None,
+            checking_call_support: false,
             settings_modal_open: false,
             settings_tab: SettingsTab::General,
             settings: loaded_settings,
@@ -941,8 +940,14 @@ impl ZaloGuiApp {
                     self.sticker_textures.insert(key, tex);
                 }
                 GuiEvent::ImageFailed {key} => {
+                    if key.starts_with("ava_") {
+                        self.loading_stickers.remove(&key);
+                        ctx.data_mut(|data|data.insert_temp(Id::new(("avatar_retry",&key)),std::time::Instant::now()+Duration::from_secs(60)));
+                    }
+
                     ctx.data_mut(|data| {let mut failed=data.get_temp::<HashSet<String>>(Id::new("failed_images")).unwrap_or_default();failed.insert(key);data.insert_temp(Id::new("failed_images"),failed);});
                 }
+                GuiEvent::CallSupportReady(report) => {self.call_support=Some(report);self.checking_call_support=false;}
                 GuiEvent::InlineVideoReady {url,path} => {
                     if self.video_loading_url.as_deref()==Some(&url) {
                         self.video_loading_url=None;

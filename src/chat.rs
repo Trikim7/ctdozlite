@@ -2664,7 +2664,7 @@ pub async fn get_groups(s: &Session) -> Result<Vec<Thread>> {
             for g in groups.iter_mut() {
                 if let Some(profile)=profiles.get(&g.id) {
                     if let Some(name)=pick_str(profile,&["name","groupName","displayName"]).filter(|n|!n.trim().is_empty()) {g.name=name;}
-                    g.avatar=pick_str(profile,&["fullAvt","avt","avatar"]).filter(|a|!a.is_empty()).or_else(||g.avatar.clone());
+                    g.avatar=pick_str(profile,&["avatar","avt","fullAvt"]).filter(|a|!a.is_empty()).or_else(||g.avatar.clone());
                 }
             }
         }
