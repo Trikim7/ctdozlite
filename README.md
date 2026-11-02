@@ -2,7 +2,14 @@
 
 Bản fork của [ctdoteam1110/ctdozlite](https://github.com/ctdoteam1110/ctdozlite), một Zalo client không chính thức viết bằng Rust với GUI và TUI. Giữ nguyên giấy phép MIT / Apache-2.0 và ghi nhận tác giả gốc.
 
-**Phiên bản mã nguồn của fork: 0.1.3.** Các bản EXE/DEB/DMG từ repository gốc không chứa những sửa đổi dưới đây. Không dùng chúng để đánh giá bản fork.
+**Phiên bản mã nguồn của fork: 0.1.4.** Các bản EXE/DEB/DMG từ repository gốc không chứa những sửa đổi dưới đây. Không dùng chúng để đánh giá bản fork.
+
+## Bản 0.1.4 — giảm tăng RAM khi mở lịch sử lớn
+
+- Chỉ tải ảnh/sticker gần vùng đang xem; bộ đệm texture giữ tối đa 64 MiB / 256 ảnh và loại ảnh ít dùng. Đây là giới hạn bộ đệm ảnh, không phải tổng RAM ứng dụng.
+- Tối đa 3 lượt tải/giải mã ảnh; giữ giới hạn cả khi ảnh đã giải mã đang chờ giao diện. Ảnh trong hội thoại thu nhỏ tối đa 640px; mở ảnh lớn vẫn dùng bản 1600px. Không giải mã lại cùng tệp ba lần.
+- Lưu lịch sử bằng một luồng duy nhất, gộp thay đổi trong mỗi khung hình và thay snapshot chờ bằng bản mới nhất; không tạo thêm một tác vụ ghi toàn bộ lịch sử cho từng sự kiện.
+- Ánh xạ đồng bộ điện thoại chỉ giữ metadata hội thoại. Xác thực cache cũ khi lưu không dựng thêm toàn bộ lịch sử vào RAM. Hàng đợi khung hình cuộc gọi cũng được giới hạn.
 
 ## Bản 0.1.3
 

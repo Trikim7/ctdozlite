@@ -43,3 +43,10 @@ Người dùng xác nhận dùng Android, sẵn sàng và đã bấm cho phép �
 Nút X nay thoát, lưu cache mã hóa khi thoát. Ảnh nhận vào có nhãn loại media đúng; hỗ trợ thumbnail WebP/GIF. Video phát trong hội thoại bằng FFmpeg và FFplay; tệp tải riêng 0600, tối đa 256 MB, giải mã chỉ dùng file/pipe, có play/pause/replay, dừng khi chuyển hội thoại. Đã thử thành công phát/pause/resume và xóa file tạm bằng fixture ngoại tuyến. 123 bài test thư viện đạt, 4 ignored; riêng test playback ignored đã được chạy và đạt trên máy này.
 
 Log chỉ số: work/phone-real-sync2.log; không in nội dung, ID, khóa. Diagnostic CLI src/bin/phone_sync.rs (--diagnose, --self-test, --run); --run chỉ dùng khi GUI đã đóng. Không mở hai kết nối đồng bộ song song. Tiếp tục thử bằng bản mới để tránh tranh chấp với cửa sổ cũ. FFmpeg/FFplay được cài riêng trong ~/.local/lib/ctdozlite-media và wrapper ~/.local/bin, không đổi gói hệ thống.
+
+
+## Cập nhật 0.1.4 — xử lý tăng RAM
+
+Đã rà soát việc render toàn bộ lịch sử khiến tải ảnh ngoài viewport, texture cache không giới hạn, nhiều tác vụ spawn_blocking cùng giữ snapshot toàn bộ hội thoại, và Mapping đồng bộ giữ bản sao lịch sử không cần thiết. Thay bằng tải ảnh theo viewport, LRU texture tối đa 64 MiB/256 ảnh, ba permit giữ qua cả hàng đợi GUI, một writer + một snapshot chờ được thay bằng bản mới nhất, và metadata-only Mapping. Cache cũ vẫn được kiểm tra xác thực và JSON trước khi ghi, nhưng không deserialize lại toàn bộ Thread. Khung hình cuộc gọi chờ GUI giới hạn hai, rớt khung khi bận.
+
+128 bài kiểm thử thư viện đạt; gồm hội thoại giả 5.000 ảnh chỉ tạo yêu cầu gần viewport, loại texture/giải phóng handle, coalescing snapshot và giới hạn hàng đợi ảnh. Test native_history_and_cache_roundtrip_and_missing_key_protection được chạy riêng và đạt, dùng khóa tạm rồi xóa, không thay khóa người dùng. Release build Linux thành công. Các con số này chưa chứng minh ổn định RAM trong một phiên đồng bộ Android đầy đủ. Tình trạng URL media sau import và hoàn tất toàn bộ đồng bộ từ checkpoint trước vẫn cần kiểm chứng riêng.

@@ -73,6 +73,7 @@ impl Mapping {
     async fn load(s:&Session)->Result<Self> {
         let mut threads=chat::load_threads_cache();
         if threads.is_empty(){threads=chat::get_friends(s).await?;}
+        for thread in &mut threads { thread.messages.clear(); thread.messages.shrink_to_fit(); }
         let mut mapping=Self::default();
         let group_ids:Vec<String>=threads.iter().filter(|t|t.is_group).map(|t|t.id.clone()).collect();
         for chunk in group_ids.chunks(25) {

@@ -1280,7 +1280,7 @@ impl ZaloGuiApp {
                                     ui.horizontal_wrapped(|ui| {
                                         ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
                                         for (tkey, thumb_u, full_u, ptitle) in &shared_photos {
-                                            if !self.sticker_textures.contains_key(tkey)
+                                            if media_visible(ui) && !self.sticker_textures.contains_key(tkey)
                                                 && self.loading_stickers.insert(tkey.clone())
                                             {
                                                 if let Some(tx) = WORKER_TX.get() {
@@ -2587,7 +2587,7 @@ impl ZaloGuiApp {
                                             && !lower_u.starts_with("https://"));
                                     let hd_tex_key = if !full_url.is_empty() && is_direct_img {
                                         let hk = format!(
-                                            "thumb_{}",
+                                            "thumb_hd_{}",
                                             crate::crypto::md5_hex(&full_url)
                                         );
                                         if hk != tex_key

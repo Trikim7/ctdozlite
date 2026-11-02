@@ -130,8 +130,14 @@ pub(crate) fn save_cache(path: &Path, threads: &[crate::chat::Thread]) -> Result
     let cipher = DataCipher::for_path(path, !encrypted)?;
     // Refuse to overwrite unreadable or tampered history with an empty/new snapshot.
     if let Some(text) = &previous {
-        decode_cache(text, &cipher)?;
+        // Authenticate and validate the old file without allocating a second complete history.
+        let plaintext=match text.strip_prefix(CACHE_MAGIC) {
+            Some(encrypted)=>Zeroizing::new(cipher.decrypt("cache", "threads", encrypted)?),
+            None=>Zeroizing::new(text.to_string()),
+        };
+        let _: serde::de::IgnoredAny=serde_json::from_str(&plaintext)?;
     }
+    drop(previous);
     write_cache(path, threads, &cipher)
 }
 

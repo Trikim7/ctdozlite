@@ -4,6 +4,11 @@
 //! decodes Opus, plays to speaker. Simple blocking loop with 20 ms frames.
 //! No jitter buffer / resampling / echo cancellation yet.
 
+fn video_frame_slots() -> &'static std::sync::Arc<tokio::sync::Semaphore> {
+    static SLOTS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>>=std::sync::OnceLock::new();
+    SLOTS.get_or_init(||std::sync::Arc::new(tokio::sync::Semaphore::new(2)))
+}
+
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use opus::{Channels as OpusChannels, Decoder, Encoder};
@@ -997,11 +1002,13 @@ fn run_local_preview_decoder(
     let mut frame = vec![0u8; PREV_BYTES];
     while !stop.load(Ordering::Relaxed) {
         if stdout.read_exact(&mut frame).is_ok() {
+            let Ok(permit)=video_frame_slots().clone().try_acquire_owned() else {continue;};
             let (cw, ch, cropped) = trim_black_borders(&frame, PREV_W, PREV_H);
             let img = eframe::egui::ColorImage::from_rgba_unmultiplied([cw, ch], &cropped);
             let _ = gui_tx.send(crate::gui::GuiEvent::StickerImageReady {
                 key: "call_local_video".to_string(),
                 image: img,
+                _permit: permit,
             });
             egui_ctx.request_repaint();
         } else {
@@ -1929,12 +1936,14 @@ fn run_h264_ffmpeg_decoder(
             if decoded == 1 || decoded % 100 == 0 {
                 crate::voip_log::line("VDEC", format!("decoded frame #{decoded}"));
             }
+            let Ok(permit)=video_frame_slots().clone().try_acquire_owned() else {continue;};
             let (cw, ch, cropped) = trim_black_borders(&raw_frame, VID_W, VID_H);
             let color_img =
                 eframe::egui::ColorImage::from_rgba_unmultiplied([cw, ch], &cropped);
             let _ = gui_tx.send(crate::gui::GuiEvent::StickerImageReady {
                 key: "call_remote_video".to_string(),
                 image: color_img,
+                _permit: permit,
             });
             egui_ctx.request_repaint();
         } else {

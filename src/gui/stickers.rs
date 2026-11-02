@@ -951,7 +951,7 @@ impl ZaloGuiApp {
                                     ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
                                     for pack in &packs_snapshot {
                                         let icon_key = format!("pack_ic_{}", pack.id);
-                                        if !pack.icon_url.is_empty()
+                                        if media_visible(ui) && !pack.icon_url.is_empty()
                                             && !self.sticker_textures.contains_key(&icon_key)
                                             && self.loading_stickers.insert(icon_key.clone())
                                         {
@@ -1220,7 +1220,7 @@ impl ZaloGuiApp {
                             )
                         };
 
-                        if !self.sticker_textures.contains_key(&key)
+                        if media_visible(ui) && !self.sticker_textures.contains_key(&key)
                             && self.loading_stickers.insert(key.clone())
                         {
                             if let Some(tx) = WORKER_TX.get() {
@@ -1509,7 +1509,7 @@ impl ZaloGuiApp {
                                                 )
                                             };
 
-                                            if !self.sticker_textures.contains_key(&key)
+                                            if media_visible(ui) && !self.sticker_textures.contains_key(&key)
                                                 && self.loading_stickers.insert(key.clone())
                                             {
                                                 if let Some(tx) = WORKER_TX.get() {

@@ -22,6 +22,13 @@ use crate::qr::QrLogin;
 use crate::session::Session;
 
 
+pub(crate) fn image_slots() -> &'static std::sync::Arc<tokio::sync::Semaphore> {
+    static SLOTS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>>=std::sync::OnceLock::new();
+    SLOTS.get_or_init(||std::sync::Arc::new(tokio::sync::Semaphore::new(3)))
+}
+
+mod memory;
+use memory::{TextureCache, media_visible};
 mod messages;
 mod modals;
 mod stickers;
@@ -73,6 +80,7 @@ pub enum GuiEvent {
     StickerImageReady {
         key: String,
         image: egui::ColorImage,
+        _permit: tokio::sync::OwnedSemaphorePermit,
     },
     InlineVideoReady {url:String,path:tempfile::TempPath},
     InlineVideoFailed {url:String},
@@ -285,6 +293,7 @@ impl AppSettings {
 
 
 pub struct ZaloGuiApp {
+    persistence_dirty: std::cell::Cell<bool>,
     // Theme state
     dark_mode: bool,
     theme_dirty: bool,
@@ -343,7 +352,7 @@ pub struct ZaloGuiApp {
     // Sticker picker & image cache state
     sticker_picker_open: bool,
     sticker_tab: StickerTab,
-    sticker_textures: HashMap<String, TextureHandle>,
+    sticker_textures: TextureCache,
     loading_stickers: HashSet<String>,
     emoji_textures: HashMap<String, TextureHandle>,
     app_logo_texture: Option<TextureHandle>,
@@ -528,7 +537,8 @@ impl ZaloGuiApp {
             in_chat_search_focus_pending: false,
             sticker_picker_open: false,
             sticker_tab: StickerTab::Popular,
-            sticker_textures: HashMap::new(),
+            persistence_dirty: std::cell::Cell::new(false),
+            sticker_textures: TextureCache::default(),
             loading_stickers: HashSet::new(),
             emoji_textures: load_default_emoji_textures(&cc.egui_ctx),
             app_logo_texture: load_app_logo_texture(&cc.egui_ctx),
@@ -599,10 +609,7 @@ impl ZaloGuiApp {
     }
 
     fn persist_threads_async(&self) {
-        let snapshot = self.threads.clone();
-        if let Some(wtx) = WORKER_TX.get() {
-            let _ = wtx.send(WorkerCmd::PersistThreads(snapshot));
-        }
+        self.persistence_dirty.set(true);
     }
 
     fn check_events(&mut self, ctx: &egui::Context) {
@@ -927,7 +934,7 @@ impl ZaloGuiApp {
                     }
                     self.status_msg = "Đã thu hồi tin nhắn với mọi người".into();
                 }
-                GuiEvent::StickerImageReady { key, image } => {
+                GuiEvent::StickerImageReady { key, image, _permit } => {
                     ctx.data_mut(|data| {let mut failed=data.get_temp::<HashSet<String>>(Id::new("failed_images")).unwrap_or_default();failed.remove(&key);data.insert_temp(Id::new("failed_images"),failed);});
                     self.loading_stickers.remove(&key);
                     let tex = ctx.load_texture(&key, image, TextureOptions::LINEAR);
@@ -1316,6 +1323,10 @@ impl eframe::App for ZaloGuiApp {
                 });
         } else {
             self.render_chat_workspace(ctx, &pal);
+        }
+
+        if self.persistence_dirty.replace(false) {
+            if let Some(slot)=PERSIST_SLOT.get() { slot.replace(self.threads.clone()); }
         }
 
         if !ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {

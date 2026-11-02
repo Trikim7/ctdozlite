@@ -236,9 +236,10 @@ pub(super) fn paint_user_avatar(
     name: &str,
     is_group: bool,
     avatar_url: Option<&str>,
-    textures: &HashMap<String, TextureHandle>,
+    textures: &TextureCache,
     loading: &mut HashSet<String>,
 ) {
+    if !painter.clip_rect().expand(100.0).contains(center) { return; }
     if let Some(url) = avatar_url
         .map(str::trim)
         .filter(|u| !u.is_empty() && (u.starts_with("http://") || u.starts_with("https://")))

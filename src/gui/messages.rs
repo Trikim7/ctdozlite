@@ -19,7 +19,7 @@ pub(super) fn is_sticker_message(msg: &ChatMessage) -> Option<(u64, u64)> {
 pub(super) fn render_sticker_widget(
     ui: &mut egui::Ui,
     msg: &ChatMessage,
-    sticker_textures: &HashMap<String, TextureHandle>,
+    sticker_textures: &TextureCache,
     loading_stickers: &mut HashSet<String>,
 ) -> bool {
     let Some((sid, cid)) = is_sticker_message(msg) else {
@@ -33,7 +33,7 @@ pub(super) fn render_sticker_widget(
         format!("https://api.zaloapp.com/api/emoticon/sticker/webpc?eid={sid}&size=130")
     };
 
-    if !sticker_textures.contains_key(&key) && loading_stickers.insert(key.clone()) {
+    if media_visible(ui) && !sticker_textures.contains_key(&key) && loading_stickers.insert(key.clone()) {
         if let Some(tx) = WORKER_TX.get() {
             let _ = tx.send(WorkerCmd::FetchStickerImage {
                 key: key.clone(),
@@ -939,14 +939,14 @@ pub(super) fn same_message_cluster(a: &ChatMessage, b: &ChatMessage) -> bool {
     true
 }
 
-fn render_inline_video(ui:&mut egui::Ui,msg:&ChatMessage,max_width:f32,textures:&HashMap<String,TextureHandle>,loading:&mut HashSet<String>)->Option<BubbleAction> {
+fn render_inline_video(ui:&mut egui::Ui,msg:&ChatMessage,max_width:f32,textures:&TextureCache,loading:&mut HashSet<String>)->Option<BubbleAction> {
     let Some(url)=msg.link_url.as_deref().filter(|url|!url.is_empty()) else {ui.label("[Video không còn đường dẫn tải]");return None;};
     let state=ui.ctx().data(|data|data.get_temp::<crate::inline_video::VideoUiState>(crate::inline_video::state_id())).unwrap_or_default();
     let active=state.url.as_deref()==Some(url);let pending=state.loading.as_deref()==Some(url);
     let video_key=crate::inline_video::texture_key(url);
     let thumb_key=msg.link_thumb.as_deref().filter(|url|!url.is_empty()).map(|thumb| {
         let key=format!("thumb_{}",crate::crypto::md5_hex(thumb));
-        if !textures.contains_key(&key)&&loading.insert(key.clone()) {
+        if media_visible(ui)&&!textures.contains_key(&key)&&loading.insert(key.clone()) {
             if let Some(tx)=WORKER_TX.get(){let _=tx.send(WorkerCmd::FetchStickerImage {key:key.clone(),url:thumb.to_string()});}
         }
         key
@@ -977,7 +977,7 @@ pub(super) fn render_message_body(
     pal: &ThemePalette,
     outgoing: bool,
     max_text_width: f32,
-    sticker_textures: &HashMap<String, TextureHandle>,
+    sticker_textures: &TextureCache,
     loading_stickers: &mut HashSet<String>,
 ) -> Option<BubbleAction> {
     let mut body_action = None;
@@ -1022,7 +1022,7 @@ pub(super) fn render_message_body(
             .filter(|u| !u.is_empty())
         {
             let key = format!("thumb_{}", crate::crypto::md5_hex(thumb_url));
-            if !sticker_textures.contains_key(&key) && loading_stickers.insert(key.clone()) {
+            if media_visible(ui) && !sticker_textures.contains_key(&key) && loading_stickers.insert(key.clone()) {
                 if let Some(tx) = WORKER_TX.get() {
                     let _ = tx.send(WorkerCmd::FetchStickerImage {
                         key: key.clone(),
@@ -1227,7 +1227,7 @@ pub(super) fn render_message_body(
                         .contains_key(&format!("thumb_{}", crate::crypto::md5_hex(th)))
             })
             .unwrap_or(false);
-    if needs_meta_enrich {
+    if media_visible(ui) && needs_meta_enrich {
         let meta_key = format!("linkmeta_{}", crate::crypto::md5_hex(&url));
         if loading_stickers.insert(meta_key) {
             if let Some(tx) = WORKER_TX.get() {
@@ -1247,7 +1247,7 @@ pub(super) fn render_message_body(
     // 2. Optional compact thumbnail directly inside the bubble (no nested card box)
     if let Some(thumb_url) = msg.link_thumb.as_deref().filter(|u| !u.is_empty()) {
         let key = format!("thumb_{}", crate::crypto::md5_hex(thumb_url));
-        if !sticker_textures.contains_key(&key)
+        if media_visible(ui) && !sticker_textures.contains_key(&key)
             && (thumb_url.starts_with("http://") || thumb_url.starts_with("https://"))
             && loading_stickers.insert(key.clone())
         {
@@ -1362,7 +1362,7 @@ pub(super) fn render_chat_bubble(
     thread_name: &str,
     sender_avatar: Option<&str>,
     pal: &ThemePalette,
-    sticker_textures: &HashMap<String, TextureHandle>,
+    sticker_textures: &TextureCache,
     loading_stickers: &mut HashSet<String>,
     emoji_textures: &HashMap<String, TextureHandle>,
     idx: usize,

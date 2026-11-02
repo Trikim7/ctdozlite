@@ -119,7 +119,6 @@ pub enum WorkerCmd {
         user_id: String,
         user_name: String,
     },
-    PersistThreads(Vec<Thread>),
     Logout,
 }
 
@@ -150,94 +149,20 @@ pub(super) fn is_session_expired_error(err_str: &str) -> bool {
         || err_str.contains("chưa đăng nhập")
 }
 
-/// Immediately decode any disk-cached sticker thumbnails (`stickers_cache/stk_{cid}_{sid}.png`)
-/// and push `GuiEvent::StickerImageReady` *before* sending sticker list metadata, returning any
-/// missing `(key, url, cache_path)` entries for concurrent network prefetching.
-pub(super) fn preload_disk_sticker_thumbnails(
-    items: &[crate::chat::StickerItem],
-    gui_tx: &Sender<GuiEvent>,
-    limit: usize,
-) -> Vec<(String, String, std::path::PathBuf)> {
-    let cache_dir = std::path::Path::new("stickers_cache");
-    let _ = std::fs::create_dir_all(cache_dir);
-
-    let mut missing = Vec::new();
-    for item in items.iter().take(limit) {
-        let key = format!("stk_{}_{}", item.cate_id, item.sticker_id);
-        let cache_path = cache_dir.join(format!("{key}.png"));
-        if let Ok(disk_bytes) = std::fs::read(&cache_path) {
-            if let Ok(dyn_img) = image::load_from_memory(&disk_bytes) {
-                let rgba = dyn_img.to_rgba8();
-                let size = [rgba.width() as usize, rgba.height() as usize];
-                let pixels = rgba.as_flat_samples();
-                let color_img = egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
-                let _ = gui_tx.send(GuiEvent::StickerImageReady {
-                    key,
-                    image: color_img,
-                });
-                continue;
-            } else {
-                let _ = std::fs::remove_file(&cache_path);
-            }
-        }
-        let url = if item.cate_id == 0 && (1..=30).contains(&item.sticker_id) {
-            format!(
-                "https://stc-chat.zdn.vn/images/stickers/default/thumb/{}.png",
-                item.sticker_id
-            )
-        } else {
-            format!(
-                "https://api.zaloapp.com/api/emoticon/sticker/webpc?eid={}&size=130",
-                item.sticker_id
-            )
-        };
-        missing.push((key, url, cache_path));
-    }
-    missing
-}
-
-/// Concurrently download, cache, and decode missing sticker thumbnails so the popover and search
-/// grid render smoothly without waiting for frame-by-frame lazy requests.
-async fn prefetch_missing_sticker_thumbnails(
-    http: &reqwest::Client,
-    missing: Vec<(String, String, std::path::PathBuf)>,
-    gui_tx: &Sender<GuiEvent>,
-    egui_ctx: &egui::Context,
-) {
-    if missing.is_empty() {
-        return;
-    }
-    let futs = missing.into_iter().map(|(key, url, cache_path)| {
-        let client = http.clone();
-        let tx = gui_tx.clone();
-        let ctx = egui_ctx.clone();
-        async move {
-            if let Ok(resp) = client.get(&url).send().await {
-                if resp.status().is_success() {
-                    if let Ok(b) = resp.bytes().await {
-                        let vec = b.to_vec();
-                        if let Ok(dyn_img) = image::load_from_memory(&vec) {
-                            let _ = std::fs::write(&cache_path, &vec);
-                            let rgba = dyn_img.to_rgba8();
-                            let size = [rgba.width() as usize, rgba.height() as usize];
-                            let pixels = rgba.as_flat_samples();
-                            let color_img =
-                                egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
-                            let _ = tx.send(GuiEvent::StickerImageReady {
-                                key,
-                                image: color_img,
-                            });
-                            ctx.request_repaint();
-                        }
-                    }
-                }
-            }
-        }
-    });
-    futures_util::future::join_all(futs).await;
-}
+pub(super) static PERSIST_SLOT: std::sync::OnceLock<std::sync::Arc<memory::Latest<Vec<Thread>>>> = std::sync::OnceLock::new();
 
 pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, egui_ctx: egui::Context) {
+    let slot=std::sync::Arc::new(memory::Latest::<Vec<Thread>>::default());
+    if PERSIST_SLOT.set(slot.clone()).is_ok() {
+        std::thread::Builder::new().name("history-writer".into()).spawn(move || loop {
+            let snapshot=slot.take();
+            if let Ok(mut store)=crate::store::MessageStore::open("zalo_history.db") {
+                let _=crate::store::persist_threads(&mut store,&snapshot);
+            }
+            crate::chat::save_threads_cache(&snapshot);
+        }).expect("history writer");
+    }
+
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerCmd>();
     let _ = WORKER_TX.set(cmd_tx);
 
@@ -406,6 +331,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                     });
                 }
 
+                let image_slots=image_slots().clone();
                 let mut current_qr_task: Option<tokio::task::JoinHandle<()>> = None;
                 let mut history_task: Option<tokio::task::JoinHandle<()>> = None;
                 let mut phone_task:Option<tokio::task::JoinHandle<()>>=None;
@@ -468,17 +394,6 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                 }
                                 let _=tx.send(GuiEvent::HistoryFinished(format!("Đã tải {added} tin lịch sử máy chủ; {failed} hội thoại chưa tải được. Chưa có đồng bộ trực tiếp từ điện thoại.")));ctx.request_repaint();
                             }));
-                        }
-                        WorkerCmd::PersistThreads(threads_snapshot) => {
-                            tokio::task::spawn_blocking(move || {
-                                if let Ok(mut store) =
-                                    crate::store::MessageStore::open("zalo_history.db")
-                                {
-                                    let _ =
-                                        crate::store::persist_threads(&mut store, &threads_snapshot);
-                                }
-                                crate::chat::save_threads_cache(&threads_snapshot);
-                            });
                         }
                         WorkerCmd::Logout => {
                             if let Some(task)=phone_task.take(){task.abort();}
@@ -1361,10 +1276,13 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                             });
                         }
                         WorkerCmd::FetchStickerImage { key, url } => {
+                            let slots=image_slots.clone();
                             let session_clone = session.clone();
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
                             tokio::spawn(async move {
+                                // Hold admission through GUI consumption, bounding queued decoded pixels too.
+                                let Ok(permit)=slots.acquire_owned().await else {return;};
                                 let cache_dir = std::path::Path::new("stickers_cache");
                                 let _ = std::fs::create_dir_all(cache_dir);
                                 let cache_path = cache_dir.join(format!("{key}.png"));
@@ -1372,12 +1290,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                 let private_media=key.starts_with("thumb_");
                                 let cached=if private_media {None} else {std::fs::read(&cache_path).ok()};
                                 let bytes_opt = if let Some(disk_bytes) = cached {
-                                    if crate::inline_video::decode_image(&disk_bytes).is_ok() {
-                                        Some(disk_bytes)
-                                    } else {
-                                        let _ = std::fs::remove_file(&cache_path);
-                                        None
-                                    }
+                                    Some(disk_bytes)
                                 } else if !url.starts_with("http://") && !url.starts_with("https://") {
                                     std::fs::read(&url).ok()
                                 } else {
@@ -1388,12 +1301,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                             if let Ok(b) = crate::inline_video::read_image_bytes(resp).await {
                                                 if b.len()>24*1024*1024 {let _=gui_tx_clone.send(GuiEvent::ImageFailed {key});ctx_clone.request_repaint();return;}
                                                 let vec = b.to_vec();
-                                                if crate::inline_video::decode_image(&vec).is_ok() {
-                                                    if !private_media {let _ = std::fs::write(&cache_path, &vec);}
-                                                    Some(vec)
-                                                } else {
-                                                    None
-                                                }
+                                                Some(vec)
                                             } else {
                                                 None
                                             }
@@ -1407,6 +1315,8 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
 
                                 if let Some(bytes) = bytes_opt {
                                     if let Ok(dyn_img) = crate::inline_video::decode_image(&bytes) {
+                                        if !private_media { let _=std::fs::write(&cache_path,&bytes); }
+                                        let dyn_img=if private_media && !key.starts_with("thumb_hd_") {dyn_img.thumbnail(640,640)} else {dyn_img};
                                         let mut rgba = dyn_img.to_rgba8();
                                         // Apply smooth anti-aliased circular alpha mask for avatar textures (`ava_*`)
                                         if key.starts_with("ava_") {
@@ -1454,6 +1364,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                         let _ = gui_tx_clone.send(GuiEvent::StickerImageReady {
                                             key,
                                             image: color_img,
+                                            _permit: permit,
                                         });
                                         ctx_clone.request_repaint();
                                         return;
@@ -1527,23 +1438,11 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                 let s = session_clone.lock().await.clone();
                                 match crate::chat::search_stickers_by_keyword(&s, &keyword).await {
                                     Ok(items) => {
-                                        let missing = preload_disk_sticker_thumbnails(
-                                            &items,
-                                            &gui_tx_clone,
-                                            24,
-                                        );
                                         let _ = gui_tx_clone.send(GuiEvent::StickerSearchResults {
                                             keyword,
                                             items,
                                         });
                                         ctx_clone.request_repaint();
-                                        prefetch_missing_sticker_thumbnails(
-                                            &s.http,
-                                            missing,
-                                            &gui_tx_clone,
-                                            &ctx_clone,
-                                        )
-                                        .await;
                                     }
                                     Err(e) => {
                                         crate::logger::log_error(
@@ -1568,21 +1467,12 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                 let items = crate::chat::search_stickers_by_keyword(&s, &keyword)
                                     .await
                                     .unwrap_or_default();
-                                let missing =
-                                    preload_disk_sticker_thumbnails(&items, &gui_tx_clone, 16);
                                 let _ =
                                     gui_tx_clone.send(GuiEvent::ComposerStickerSuggestions {
                                         keyword,
                                         items,
                                     });
                                 ctx_clone.request_repaint();
-                                prefetch_missing_sticker_thumbnails(
-                                    &s.http,
-                                    missing,
-                                    &gui_tx_clone,
-                                    &ctx_clone,
-                                )
-                                .await;
                             });
                         }
                         WorkerCmd::ParseLinkPreview { url } => {
