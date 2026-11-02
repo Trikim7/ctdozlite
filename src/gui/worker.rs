@@ -2,6 +2,9 @@ use super::*;
 
 pub enum WorkerCmd {
     RequestQr,
+    RefreshAliases,
+    ReadClipboard {thread_id:String,fallback:Option<String>},
+    SendClipboardAttachments {to_id:String,is_group:bool,caption:String,files:Vec<crate::clipboard::Attachment>},
     CheckCallSupport,
     LoginPassword {
         phone: String,
@@ -340,6 +343,43 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
 
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        WorkerCmd::RefreshAliases => {
+                            let s=session.lock().await.clone();let tx=gui_tx.clone();let ctx=egui_ctx.clone();
+                            tokio::spawn(async move {
+                                let owner=s.login.as_ref().map(|u|u.uin.clone()).unwrap_or_default();
+                                let result=crate::nicknames::fetch(&s).await.map_err(|e|e.to_string());
+                                if let Ok(aliases)=&result {let _=crate::nicknames::save(&owner,aliases);}
+                                let _=tx.send(GuiEvent::AliasesUpdated {owner,result});ctx.request_repaint();
+                            });
+                        }
+
+                        WorkerCmd::ReadClipboard {thread_id,fallback} => {
+                            let tx=gui_tx.clone();let ctx=egui_ctx.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let result=crate::clipboard::read(fallback).map_err(|e|e.to_string());
+                                #[cfg(target_os="windows")]
+                                let result=if let Some((path,_,_,_))=read_clipboard_image_to_png() {
+                                    let image=std::fs::read(&path).map_err(anyhow::Error::from).and_then(|bytes|crate::clipboard::prepare_image(&bytes));
+                                    let _=std::fs::remove_file(path);image.map(crate::clipboard::Contents::Image).map_err(|e|e.to_string())
+                                }else{result};
+                                let _=tx.send(GuiEvent::ClipboardReady {thread_id,result});ctx.request_repaint();
+                            });
+                        }
+                        WorkerCmd::SendClipboardAttachments {to_id,is_group,caption,files} => {
+                            let shared=session.clone();let tx=gui_tx.clone();let ctx=egui_ctx.clone();
+                            tokio::spawn(async move {
+                                let s=shared.lock().await.clone();
+                                for (index,file) in files.into_iter().enumerate() {
+                                    let result=crate::chat::send_attachment(&s,&to_id,is_group,&file.path,if index==0 {&caption}else{""}).await;
+                                    match result {
+                                        Ok((_,msg))=>{let _=tx.send(GuiEvent::AttachmentSent {thread_id:to_id.clone(),msg});}
+                                        Err(error)=>{let _=tx.send(GuiEvent::SendFailed {thread_id:to_id.clone(),text:if index==0 {caption.clone()}else{String::new()},error:format!("Không gửi được tệp clipboard: {error}")});}
+                                    }
+                                    drop(file);ctx.request_repaint();
+                                }
+                            });
+                        }
+
                         WorkerCmd::CheckCallSupport => {
                             let tx=gui_tx.clone();let ctx=egui_ctx.clone();
                             tokio::task::spawn_blocking(move || {let report=crate::call_support::CallSupport::inspect();let _=tx.send(GuiEvent::CallSupportReady(report));ctx.request_repaint();});

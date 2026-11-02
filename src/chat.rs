@@ -644,7 +644,12 @@ pub async fn send_attachment(
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
-    let file_bytes = std::fs::read(file_path)?;
+    // Bound the existing in-memory multipart encoder even if a file grows after metadata check.
+    const MAX_ATTACHMENT:usize=128*1024*1024;
+    let file=std::fs::File::open(file_path)?;
+    anyhow::ensure!(file.metadata()?.len()<=MAX_ATTACHMENT as u64,"Mỗi tệp hiện tối đa 128 MB để giữ mức dùng RAM thấp");
+    let mut file_bytes=Vec::new();std::io::Read::read_to_end(&mut std::io::Read::take(file,(MAX_ATTACHMENT+1) as u64),&mut file_bytes)?;
+    anyhow::ensure!(file_bytes.len()<=MAX_ATTACHMENT,"Tệp vượt quá 128 MB");
     if file_bytes.is_empty() {
         anyhow::bail!("Tập tin rỗng (0 byte)");
     }

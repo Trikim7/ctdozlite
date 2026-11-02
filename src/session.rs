@@ -44,6 +44,8 @@ pub struct Domains {
     pub lp_control: String,
     /// `zpw_service_map_v3.friend[0]` — `social/friend/getfriends`.
     pub friend: String,
+    #[serde(default = "default_alias")]
+    pub alias: String,
     /// `zpw_service_map_v3.conversation[0]` — `conv/*`, `hiddenconvers/*`.
     pub convers_api: String,
     /// `zpw_service_map_v3.profile[0]` — `getprofiles`, `me-v2`.
@@ -83,6 +85,8 @@ fn default_voice_call() -> String {
     "https://voicecall-wpa.chat.zalo.me".into()
 }
 
+fn default_alias()->String {crate::endpoints::service("alias").unwrap_or("https://tt-alias-wpa.chat.zalo.me").into()}
+
 fn default_sticker() -> String {
     crate::endpoints::service("sticker")
         .unwrap_or("https://tt-sticker-wpa.chat.zalo.me")
@@ -106,6 +110,7 @@ impl Default for Domains {
             lp_chat: default_lp_chat(),
             lp_control: default_lp_control(),
             friend: "https://tt-friend-wpa.chat.zalo.me".into(),
+            alias: default_alias(),
             convers_api: "https://tt-convers-wpa.chat.zalo.me".into(),
             profile: "https://tt-profile-wpa.chat.zalo.me".into(),
             group: "https://tt-group-wpa.zaloapp.com".into(),
@@ -544,6 +549,7 @@ impl Session {
             for (key, slot) in [
                 ("chat", &mut self.domains.chat),
                 ("friend", &mut self.domains.friend),
+                ("alias", &mut self.domains.alias),
                 ("conversation", &mut self.domains.convers_api),
                 ("profile", &mut self.domains.profile),
                 ("group", &mut self.domains.group),

@@ -1,6 +1,6 @@
 [package]
 name = "ctdozlite"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 authors = ["TIPC1110 <tienichpc1110@gmail.com>"]
 description = "Native Zalo client in Rust; optional isolated Node.js helper for Android history sync"
@@ -97,3 +97,6 @@ assets = [
 [patch.crates-io]
 # Backport upstream Linux IME fix without changing the app-wide GUI API.
 egui-winit = { path = "vendor/egui-winit" }
+
+# Preserve Bamboo preedit updates after word commits on X11.
+winit = { path = "vendor/winit" }

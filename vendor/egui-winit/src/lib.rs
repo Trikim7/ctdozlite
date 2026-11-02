@@ -749,6 +749,16 @@ impl State {
                     self.egui_input.events.push(egui::Event::Copy);
                     return;
                 } else if is_paste_command(self.egui_input.modifiers, active_key) {
+                    // Preserve the paste action even when no text flavor exists (images/files).
+                    self.egui_input.events.push(egui::Event::Key {
+                        key: egui::Key::Paste, physical_key, pressed: true,
+                        repeat: false, modifiers: self.egui_input.modifiers,
+                    });
+                    // This is a semantic action, not a physical key held until V is released.
+                    self.egui_input.events.push(egui::Event::Key {
+                        key: egui::Key::Paste, physical_key, pressed: false,
+                        repeat: false, modifiers: self.egui_input.modifiers,
+                    });
                     if let Some(contents) = self.clipboard.get() {
                         let contents = contents.replace("\r\n", "\n");
                         if !contents.is_empty() {

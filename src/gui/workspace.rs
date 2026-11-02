@@ -244,6 +244,7 @@ impl ZaloGuiApp {
                     {
                         if let Some(tx) = WORKER_TX.get() {
                             let _ = tx.send(WorkerCmd::RefreshThreads);
+                            let _=tx.send(WorkerCmd::RefreshAliases);
                         }
                         self.show_toast(format!(
                             "Đang đồng bộ ngầm {} hội thoại…",
@@ -668,7 +669,7 @@ impl ZaloGuiApp {
                         };
                         pass_filter
                             && (query.is_empty()
-                                || matches_vn_query(&t.name, &query, &query_folded)
+                                || (matches_vn_query(&t.name, &query, &query_folded)||matches_vn_query(self.thread_display_name(t), &query, &query_folded))
                                 || t.id.contains(&query))
                     })
                     .map(|(i, _)| i)
@@ -703,7 +704,7 @@ impl ZaloGuiApp {
                             if matches_vn_query(&m.text, &query, &query_folded) {
                                 hits.push((
                                     t_idx,
-                                    t.name.clone(),
+                                    self.thread_display_name(t).to_owned(),
                                     m.text.clone(),
                                     m.time.clone(),
                                     t.is_group,
@@ -815,7 +816,7 @@ impl ZaloGuiApp {
                                     pal.text_primary
                                 };
                                 let max_name_chars = if is_compact_w { 15 } else { 21 };
-                                let display_name = truncate_chars(&t.name, max_name_chars);
+                                let display_name = truncate_chars(self.thread_display_name(t), max_name_chars);
                                 ui.painter().text(
                                     Pos2::new(text_left, row_rect.top() + 12.0),
                                     egui::Align2::LEFT_TOP,
@@ -917,7 +918,7 @@ impl ZaloGuiApp {
 
                             let row_resp = row_resp.on_hover_cursor(CursorIcon::PointingHand);
                             let row_resp = if is_narrow_w {
-                                row_resp.on_hover_text(&t.name)
+                                row_resp.on_hover_text(self.thread_display_name(t))
                             } else {
                                 row_resp
                             };
@@ -1027,6 +1028,7 @@ impl ZaloGuiApp {
                     self.inline_video=None;self.video_loading_url=None;
                     self.sticker_textures.retain(|key,_|!key.starts_with("video_"));
                     if self.selected_thread_index != idx {
+                        self.pending_clipboard_files.clear();self.pending_clipboard_image=None;self.clipboard_temp=None;
                         self.replying_to = None;
                         self.filter_starred_only = false;
                     }
@@ -1060,7 +1062,7 @@ impl ZaloGuiApp {
         let thread_meta = self.threads.get(self.selected_thread_index).map(|t| {
             (
                 t.id.clone(),
-                t.name.clone(),
+                self.thread_display_name(t).to_owned(),
                 t.avatar.clone(),
                 t.is_group,
                 t.messages.len(),
@@ -1204,6 +1206,7 @@ impl ZaloGuiApp {
                                         {
                                             if let Some(tx) = WORKER_TX.get() {
                                                 let _ = tx.send(WorkerCmd::RefreshThreads);
+                            let _=tx.send(WorkerCmd::RefreshAliases);
                                                 if d_is_group || d_name.contains("Cloud của tôi") {
                                                     let _ = tx.send(WorkerCmd::LoadGroupHistory {
                                                         group_id: d_id.clone(),
@@ -2249,7 +2252,7 @@ impl ZaloGuiApp {
                     // area and composer input box never shift or lose IME focus while typing.
                     let picker_reserve = (if self.sticker_picker_open { 268.0 } else { 0.0 })
                         + (if self.replying_to.is_some() { 48.0 } else { 0.0 })
-                        + (if self.pending_clipboard_image.is_some() {
+                        + (if self.pending_clipboard_image.is_some() || !self.pending_clipboard_files.is_empty() {
                             64.0
                         } else {
                             0.0
@@ -2680,86 +2683,23 @@ impl ZaloGuiApp {
                             self.replying_to = None;
                         }
                     }
-                    // 3c. Clipboard Image Preview Banner (`Ctrl+V` / `Shift+Insert` screenshot or image file paste)
-                    if is_clipboard_paste_triggered(ctx) {
-                        if let Some((path, w, h, col_img)) = read_clipboard_image_to_png() {
-                            // Consume any text Paste event on this frame so the composer doesn't paste a file path
-                            ctx.input_mut(|i| {
-                                i.events.retain(|e| !matches!(e, egui::Event::Paste(_)));
-                            });
-                            let tex = ctx.load_texture(
-                                format!("clip_preview_{}", crate::login::unix_now()),
-                                col_img,
-                                TextureOptions::LINEAR,
-                            );
-                            self.pending_clipboard_image = Some((path, w, h, tex));
-                            self.composer_focus_pending = true;
-                            self.show_toast(format!(
-                                "Đã dán ảnh ({w}×{h} px) từ Clipboard — nhấn Enter để gửi"
-                            ));
+                    // Decode clipboard payloads asynchronously; never block the UI on an owner.
+                    let composer_id=Id::new(("chat_composer_input", &thread_id));
+                    if !self.clipboard_loading && !self.settings_modal_open
+                        && ctx.memory(|m|m.focused()==Some(composer_id))
+                        && is_clipboard_paste_triggered(ctx) {
+                        let fallback=ctx.input(|i|i.events.iter().find_map(|event|if let egui::Event::Paste(text)=event {Some(text.clone())}else{None}));
+                        ctx.input_mut(|i|i.events.retain(|e|!matches!(e,egui::Event::Paste(_))));
+                        self.request_clipboard(&thread_id,fallback);
+                    }
+                    if !self.pending_clipboard_files.is_empty() {
+                        if render_clipboard_files(ui,pal,&self.pending_clipboard_files)||ui.input(|i|i.key_pressed(Key::Escape)) {
+                            self.pending_clipboard_files.clear();self.pending_clipboard_thread=None;
                         }
                     }
-                    if self.pending_clipboard_image.is_some() {
-                        let mut clear_clip = false;
-                        if ui.input(|i| i.key_pressed(Key::Escape)) {
-                            clear_clip = true;
-                        }
-                        if let Some((ref path, w, h, ref tex)) = self.pending_clipboard_image {
-                            egui::Frame::none()
-                                .fill(pal.bg_elevated)
-                                .inner_margin(Margin::symmetric(14.0, 6.0))
-                                .stroke(Stroke::new(
-                                    1.0_f32,
-                                    pal.primary.linear_multiply(0.55),
-                                ))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.add(
-                                            egui::Image::new(tex)
-                                                .fit_to_exact_size(Vec2::new(48.0, 48.0))
-                                                .rounding(Rounding::same(6.0)),
-                                        );
-                                        ui.add_space(6.0);
-                                        ui.vertical(|ui| {
-                                            ui.label(
-                                                RichText::new(format!(
-                                                    "{} Ảnh chụp từ bộ nhớ tạm (Ctrl+V)",
-                                                    lucide::IMAGE
-                                                ))
-                                                .size(12.2)
-                                                .color(pal.primary)
-                                                .strong(),
-                                            );
-                                            let fname = path
-                                                .file_name()
-                                                .and_then(|n| n.to_str())
-                                                .unwrap_or("clipboard.png");
-                                            ui.label(
-                                                RichText::new(format!(
-                                                    "{fname} · {w}×{h} px — Nhập chú thích bên dưới rồi nhấn Enter để gửi"
-                                                ))
-                                                .size(11.3)
-                                                .color(pal.text_secondary),
-                                            );
-                                        });
-                                        ui.with_layout(
-                                            Layout::right_to_left(Align::Center),
-                                            |ui| {
-                                                if ui
-                                                    .small_button(format!("{} Hủy", lucide::X))
-                                                    .on_hover_cursor(CursorIcon::PointingHand)
-                                                    .on_hover_text("Hủy ảnh dán (Esc)")
-                                                    .clicked()
-                                                {
-                                                    clear_clip = true;
-                                                }
-                                            },
-                                        );
-                                    });
-                                });
-                        }
-                        if clear_clip {
-                            self.pending_clipboard_image = None;
+                    if let Some((_,w,h,texture))=self.pending_clipboard_image.as_ref() {
+                        if render_clipboard_image(ui,pal,texture,*w,*h)||ui.input(|i|i.key_pressed(Key::Escape)) {
+                            self.pending_clipboard_image=None;self.clipboard_temp=None;self.pending_clipboard_thread=None;
                         }
                     }
 
@@ -2919,8 +2859,8 @@ impl ZaloGuiApp {
                                         );
                                         // Responsive Borderless Input Field (shrinks gracefully down to 50px)
                                         let send_btn_w = if is_narrow_w { 52.0 } else { 76.0 };
-                                        let input_w =
-                                            (ui.available_width() - send_btn_w - 12.0).max(50.0);
+                                        let right=ui.max_rect().right().min(ui.clip_rect().right())-8.0;
+                                        let input_w=(right-ui.next_widget_position().x-send_btn_w-16.0).max(24.0);
                                         let text_edit =
                                             egui::TextEdit::singleline(&mut self.input_message)
                                                 .id(Id::new(("chat_composer_input", &thread_id)))
@@ -2938,36 +2878,8 @@ impl ZaloGuiApp {
                                             self.composer_focus_pending = false;
                                         }
                                         response.context_menu(|ui| {
-                                            if ui
-                                                .button(format!(
-                                                    "{} Dán hình ảnh từ Clipboard (Ctrl+V)",
-                                                    lucide::IMAGE
-                                                ))
-                                                .clicked()
-                                            {
-                                                ui.close_menu();
-                                                if let Some((path, w, h, col_img)) =
-                                                    read_clipboard_image_to_png()
-                                                {
-                                                    let tex = ctx.load_texture(
-                                                        format!(
-                                                            "clip_preview_{}",
-                                                            crate::login::unix_now()
-                                                        ),
-                                                        col_img,
-                                                        TextureOptions::LINEAR,
-                                                    );
-                                                    self.pending_clipboard_image =
-                                                        Some((path, w, h, tex));
-                                                    self.composer_focus_pending = true;
-                                                    self.show_toast(format!(
-                                                        "Đã dán ảnh ({w}×{h} px) từ Clipboard — nhấn Enter để gửi"
-                                                    ));
-                                                } else {
-                                                    self.show_toast(
-                                                        "Không tìm thấy hình ảnh nào trong Clipboard",
-                                                    );
-                                                }
+                                            if ui.add_enabled(!self.clipboard_loading,egui::Button::new("Dán ảnh / tệp / văn bản (Ctrl+V)")).clicked() {
+                                                ui.close_menu();self.request_clipboard(&thread_id,None);
                                             }
                                         });
 
@@ -3015,7 +2927,7 @@ impl ZaloGuiApp {
                                         }
                                         // Responsive Padded Send Button (shows icon-only on very tight widths)
                                         let can_send = !self.input_message.trim().is_empty()
-                                            || self.pending_clipboard_image.is_some();
+                                            || self.pending_clipboard_image.is_some() || !self.pending_clipboard_files.is_empty();
                                         let (send_rect, send_resp) = ui.allocate_exact_size(
                                             Vec2::new(send_btn_w, 34.0),
                                             Sense::click(),
@@ -3085,29 +2997,14 @@ impl ZaloGuiApp {
                                                 });
                                             }
                                         } else if (send_clicked || enter_pressed)
-                                            && self.pending_clipboard_image.is_some()
-                                        {
-                                            if let Some((clip_path, _, _, _)) =
-                                                self.pending_clipboard_image.take()
-                                            {
-                                                let cap =
-                                                    self.input_message.trim().to_string();
-                                                self.input_message.clear();
-                                                self.dismissed_sticker_suggest_for.clear();
-                                                self.composer_sticker_selected = None;
-                                                response.request_focus();
-                                                if let Some(tx) = WORKER_TX.get() {
-                                                    let _ = tx.send(
-                                                        WorkerCmd::PickAndSendAttachment {
-                                                            to_id: thread_id.clone(),
-                                                            is_group,
-                                                            images_only: true,
-                                                            caption: cap,
-                                                            preset_path: Some(clip_path),
-                                                        },
-                                                    );
-                                                }
+                                            && (self.pending_clipboard_image.is_some()||!self.pending_clipboard_files.is_empty()) {
+                                            let mut files:Vec<crate::clipboard::Attachment>=self.pending_clipboard_files.drain(..).map(|path|crate::clipboard::Attachment {path,temporary:None}).collect();
+                                            if let Some((path,_,_,_))=self.pending_clipboard_image.take() {
+                                                files.push(crate::clipboard::Attachment {path,temporary:self.clipboard_temp.take()});
                                             }
+                                            let caption=self.input_message.trim().to_string();self.input_message.clear();
+                                            self.dismissed_sticker_suggest_for.clear();self.composer_sticker_selected=None;response.request_focus();
+                                            if let Some(tx)=WORKER_TX.get(){let _=tx.send(WorkerCmd::SendClipboardAttachments {to_id:thread_id.clone(),is_group,caption,files});}
                                         } else if (send_clicked || enter_pressed) && can_send {
                                             let text = self.input_message.trim().to_string();
                                             self.input_message.clear();

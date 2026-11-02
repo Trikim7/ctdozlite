@@ -2,7 +2,14 @@
 
 Bản fork của [ctdoteam1110/ctdozlite](https://github.com/ctdoteam1110/ctdozlite), một Zalo client không chính thức viết bằng Rust với GUI và TUI. Giữ nguyên giấy phép MIT / Apache-2.0 và ghi nhận tác giả gốc.
 
-**Phiên bản mã nguồn của fork: 0.1.5.** Các bản EXE/DEB/DMG từ repository gốc không chứa những sửa đổi dưới đây. Không dùng chúng để đánh giá bản fork.
+**Phiên bản mã nguồn của fork: 0.1.6.** Các bản EXE/DEB/DMG từ repository gốc không chứa những sửa đổi dưới đây. Không dùng chúng để đánh giá bản fork.
+
+## Bản 0.1.6 — clipboard, tiếng Việt và biệt danh
+
+- Ctrl+V / Shift+Insert và menu Dán nhận ảnh, danh sách tệp từ trình quản lý tệp và văn bản. Ảnh/tệp có xem trước, hủy hoặc gửi; tối đa 20 tệp/lần. Chỉ gửi khi người dùng bấm Gửi/Enter. Tệp ảnh tạm riêng được xóa khi hủy hoặc khi tác vụ gửi kết thúc.
+- Đọc clipboard ở background với timeout và giới hạn kích thước. X11 dùng xclip, Wayland dùng wl-paste; giữ nguyên đường dán ảnh Windows đã có. Tệp upload hiện tối đa 128 MB để chặn tăng RAM từ multipart encoder cũ.
+- Vá winit 0.30.13 để nhận preedit Bamboo sau từng lần chốt từ: từ thứ hai trở đi hiện ngay khi đang gõ. Vẫn phân biệt Enter chốt dấu với Enter gửi tin.
+- Lấy danh sách biệt danh Zalo theo trang, tự làm mới, tìm theo cả tên gốc/biệt danh và hiển thị biệt danh ở danh sách, tiêu đề và khung thông tin hội thoại. Biệt danh lưu cache mã hóa riêng, không đổi ID hoặc gộp người dùng chỉ vì trùng biệt danh.
 
 ## Bản 0.1.5 — cài đặt, avatar và thiết bị gọi
 

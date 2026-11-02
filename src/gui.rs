@@ -84,6 +84,8 @@ pub enum GuiEvent {
         image: egui::ColorImage,
         _permit: tokio::sync::OwnedSemaphorePermit,
     },
+    AliasesUpdated {owner:String,result:Result<HashMap<String,String>,String>},
+    ClipboardReady {thread_id:String,result:Result<crate::clipboard::Contents,String>},
     CallSupportReady(crate::call_support::CallSupport),
     InlineVideoReady {url:String,path:tempfile::TempPath},
     InlineVideoFailed {url:String},
@@ -305,6 +307,9 @@ pub struct ZaloGuiApp {
 
     // Session state
     is_logged_in: bool,
+    nicknames: HashMap<String,String>,
+    alias_sync_pending: bool,
+    last_alias_sync: std::time::Instant,
     user_name: String,
     user_uin: String,
     user_avatar: Option<String>,
@@ -380,6 +385,10 @@ pub struct ZaloGuiApp {
     last_composer_edit_at: std::time::Instant,
     composer_sticker_selected: Option<usize>,
     composer_focus_pending: bool,
+    pending_clipboard_thread: Option<String>,
+    clipboard_loading: bool,
+    clipboard_temp: Option<std::sync::Arc<tempfile::TempPath>>,
+    pending_clipboard_files: Vec<std::path::PathBuf>,
     pending_clipboard_image: Option<(std::path::PathBuf, u32, u32, TextureHandle)>,
     unread_counts: HashMap<String, usize>,
     link_metadata_cache: HashMap<String, crate::chat::LinkMetadata>,
@@ -492,6 +501,9 @@ impl ZaloGuiApp {
             dark_mode,
             theme_dirty: false,
             is_logged_in,
+            nicknames: crate::nicknames::load(&user_uin),
+            alias_sync_pending:false,
+            last_alias_sync:std::time::Instant::now()-Duration::from_secs(301),
             user_name,
             user_uin,
             user_avatar,
@@ -564,6 +576,10 @@ impl ZaloGuiApp {
             last_composer_edit_at: std::time::Instant::now(),
             composer_sticker_selected: None,
             composer_focus_pending: false,
+            pending_clipboard_thread: None,
+            clipboard_loading: false,
+            clipboard_temp: None,
+            pending_clipboard_files: Vec::new(),
             pending_clipboard_image: None,
             unread_counts: HashMap::new(),
             link_metadata_cache: HashMap::new(),
@@ -607,6 +623,15 @@ impl ZaloGuiApp {
         }
     }
 
+    fn thread_display_name<'a>(&'a self,thread:&'a Thread)->&'a str {
+        crate::nicknames::display_name(&self.nicknames,thread)
+    }
+
+    fn request_clipboard(&mut self,thread_id:&str,fallback:Option<String>) {
+        if self.clipboard_loading{return;}
+        if let Some(tx)=WORKER_TX.get(){self.clipboard_loading=true;let _=tx.send(WorkerCmd::ReadClipboard {thread_id:thread_id.to_owned(),fallback});}
+    }
+
     fn persist_threads_async(&self) {
         self.persistence_dirty.set(true);
     }
@@ -631,6 +656,7 @@ impl ZaloGuiApp {
                     self.history_sync_started=false;
                     self.is_logged_in = true;
                     self.user_name = name;
+                    self.nicknames=crate::nicknames::load(&uin);self.alias_sync_pending=false;self.last_alias_sync=std::time::Instant::now()-Duration::from_secs(301);
                     self.user_uin = uin;
                     if avatar.is_some() {
                         self.user_avatar = avatar;
@@ -947,6 +973,27 @@ impl ZaloGuiApp {
 
                     ctx.data_mut(|data| {let mut failed=data.get_temp::<HashSet<String>>(Id::new("failed_images")).unwrap_or_default();failed.insert(key);data.insert_temp(Id::new("failed_images"),failed);});
                 }
+                GuiEvent::AliasesUpdated {owner,result} => {
+                    if owner==self.user_uin {self.alias_sync_pending=false;if let Ok(aliases)=result {self.nicknames=aliases;}}
+                }
+                GuiEvent::ClipboardReady {thread_id,result} => {
+                    self.clipboard_loading=false;
+                    if self.threads.get(self.selected_thread_index).is_some_and(|t|t.id==thread_id) {
+                        match result {
+                            Ok(crate::clipboard::Contents::Image(image))=>{
+                                self.pending_clipboard_thread=Some(thread_id.clone());
+                                let path=image.path.to_path_buf();let texture=ctx.load_texture("clipboard_preview",image.preview,TextureOptions::LINEAR);
+                                self.pending_clipboard_image=Some((path,image.width,image.height,texture));self.clipboard_temp=Some(image.path);self.pending_clipboard_files.clear();self.composer_sticker_selected=None;self.composer_focus_pending=true;
+                            }
+                            Ok(crate::clipboard::Contents::Files(files))=>{self.pending_clipboard_thread=Some(thread_id.clone());self.composer_sticker_selected=None;self.pending_clipboard_image=None;self.clipboard_temp=None;self.pending_clipboard_files=files;self.composer_focus_pending=true;}
+                            Ok(crate::clipboard::Contents::Text(text))=>{
+                                insert_clipboard_text(ctx,&thread_id,&mut self.input_message,&text);self.composer_focus_pending=true;
+                            }
+                            Ok(crate::clipboard::Contents::Empty)=>self.show_toast("Clipboard không có ảnh, tệp hoặc văn bản có thể dán"),
+                            Err(error)=>self.show_toast(error),
+                        }
+                    }
+                }
                 GuiEvent::CallSupportReady(report) => {self.call_support=Some(report);self.checking_call_support=false;}
                 GuiEvent::InlineVideoReady {url,path} => {
                     if self.video_loading_url.as_deref()==Some(&url) {
@@ -1209,6 +1256,12 @@ impl eframe::App for ZaloGuiApp {
 
         ctx.input(|i| self.ime_state.update(&i.events));
         self.check_events(ctx);
+        if !self.is_logged_in || self.pending_clipboard_thread.as_deref().is_some_and(|id|self.threads.get(self.selected_thread_index).map(|t|t.id.as_str())!=Some(id)) {
+            self.pending_clipboard_image=None;self.clipboard_temp=None;self.pending_clipboard_files.clear();self.pending_clipboard_thread=None;
+        }
+        if self.is_logged_in && !self.alias_sync_pending && self.last_alias_sync.elapsed()>=Duration::from_secs(300) {
+            if let Some(tx)=WORKER_TX.get(){self.alias_sync_pending=true;self.last_alias_sync=std::time::Instant::now();let _=tx.send(WorkerCmd::RefreshAliases);}
+        }
         if !self.is_logged_in {self.inline_video=None;self.video_loading_url=None;}
         let mut video_state=crate::inline_video::VideoUiState::default();
         if let Some(player)=self.inline_video.as_ref() {

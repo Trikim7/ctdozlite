@@ -56,3 +56,9 @@ Log chỉ số: work/phone-real-sync2.log; không in nội dung, ID, khóa. Diag
 Người dùng yêu cầu tiếp tục dùng REA đối chiếu UI gốc, sửa settings, chuẩn bị cuộc gọi và avatar, giữ gọn nhẹ. Đã dùng REA trên các module Web chọn lọc, ghi rõ giới hạn trong UI_AND_CALLS.md. Sửa geometry/scroll/compact và overflow thẻ preview; sửa avatar crop và retry; kiểm tra thành phần gọi theo yêu cầu, thêm chọn loa, cache danh sách thiết bị. Thành phần Opus/FFmpeg/H.264/ALSA và camera đã có và kiểm tra khả năng tại máy đạt, chưa thực hiện cuộc gọi đầu-cuối hoặc ghi âm/quay camera. Không thêm dependencies.
 
 133 test thư viện đạt, 4 ignore; release Linux đạt; fixture H.264 và Opus roundtrip đạt. Giao diện thật đã kiểm tra 1020×700 và 480×360. Giữ các giới hạn bộ nhớ của 0.1.4, bỏ cache load/merge và SQLite hydrate lặp lúc khởi động. Các việc đồng bộ Android hoàn tất, media URL sau import và lịch sử SQLite cũ từ checkpoint trước vẫn chưa được coi đã giải quyết trong đợt sửa UI này.
+
+## Cập nhật 0.1.6 — dán clipboard, preedit Bamboo, alias
+
+Đã tái hiện và sửa winit X11 bỏ Update sau commit của Bamboo; probe native với Bamboo và Bamboo::Us hiện cả từ 2/3 trước Space, Enter chốt dấu không gửi. Giữ nguyên cấu hình/engine gốc sau thử. Dán ảnh/tệp/văn bản đọc qua worker, có preview/hủy, lifetime tệp tạm riêng, ID hội thoại để bỏ khi chuyển nơi, giới hạn clipboard/upload nhằm giữ RAM. xclip được cài user-local. Đã thử native Ctrl+V ảnh, Shift+Insert hai tệp tên Unicode và văn bản; không gửi tin thử, khôi phục clipboard theo định dạng chính. Đã sửa thêm preview quá rộng đẩy nút Gửi ra ngoài viewport.
+
+Alias API đọc được 35 mục, 32 khớp hội thoại; cache mã hóa roundtrip đạt. Hiển thị theo map riêng thay vì ghi đè canonical Thread.name/ID, tự làm mới. 139 test thư viện đạt, 4 ignore; release Linux build đạt. Xem CLIPBOARD_IME_NICKNAMES.md cho giới hạn và bằng chứng; các việc Android/media URL trước đó vẫn chưa hoàn tất.

@@ -393,7 +393,7 @@ pub(super) fn pick_native_file_dialog(images_only: bool) -> Option<std::path::Pa
 /// because the system clipboard contains an image instead of UTF-8 text.
 pub(super) fn is_clipboard_paste_triggered(ctx: &egui::Context) -> bool {
     let egui_paste = ctx.input(|i| {
-        (i.modifiers.ctrl && i.key_pressed(Key::V))
+        i.key_pressed(Key::Paste) || (i.modifiers.ctrl && i.key_pressed(Key::V))
             || (i.modifiers.shift && i.key_pressed(Key::Insert))
             || i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
     });
@@ -433,6 +433,7 @@ pub(super) fn is_clipboard_paste_triggered(ctx: &egui::Context) -> bool {
     }
 }
 
+#[cfg(target_os="windows")]
 pub(super) fn finalize_clipboard_rgba_image(
     rgba: image::RgbaImage,
 ) -> Option<(std::path::PathBuf, u32, u32, egui::ColorImage)> {
@@ -463,6 +464,7 @@ pub(super) fn finalize_clipboard_rgba_image(
 /// 1. Registered `"PNG"` / `"image/png"` streams (Snipping Tool, ShareX, Chrome/Edge, Discord)
 /// 2. `CF_HDROP` (`15`) copied image files from Windows Explorer or ShareX
 /// 3. `CF_DIB` (`8`) / `CF_DIBV5` (`17`) 24-bit & 32-bit bitmaps (`BI_RGB` & `BI_BITFIELDS`)
+#[cfg(target_os="windows")]
 pub(super) fn read_clipboard_image_to_png() -> Option<(std::path::PathBuf, u32, u32, egui::ColorImage)> {
     #[cfg(target_os = "windows")]
     {
@@ -2108,4 +2110,66 @@ pub(super) fn render_reactions(
                 });
         }
     });
+}
+
+
+pub(super) fn insert_clipboard_text(ctx:&egui::Context,thread_id:&str,text:&mut String,paste:&str) {
+    let id=Id::new(("chat_composer_input",thread_id));
+    let mut state=egui::text_edit::TextEditState::load(ctx,id).unwrap_or_default();
+    let range=state.cursor.char_range();
+    let count=text.chars().count();
+    let (a,b)=range.map(|r|(r.primary.index.min(r.secondary.index).min(count),r.primary.index.max(r.secondary.index).min(count))).unwrap_or((count,count));
+    let byte=|index|text.char_indices().nth(index).map(|(b,_)|b).unwrap_or(text.len());
+    text.replace_range(byte(a)..byte(b),paste);
+    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(a+paste.chars().count()))));
+    state.store(ctx,id);
+}
+
+#[cfg(test)] mod clipboard_text_tests {
+    use super::*;
+    #[cfg(target_os="linux")]
+    #[test] fn semantic_paste_press_release_is_one_action_without_a_stuck_key() {
+        let ctx=egui::Context::default();
+        let events=[true,false].into_iter().map(|pressed|egui::Event::Key {key:Key::Paste,physical_key:None,pressed,repeat:false,modifiers:egui::Modifiers::NONE}).collect();
+        let _=ctx.run(egui::RawInput {events,..Default::default()},|ctx|{assert!(is_clipboard_paste_triggered(ctx));assert!(!ctx.input(|i|i.key_down(Key::Paste)));});
+        let _=ctx.run(egui::RawInput::default(),|ctx|assert!(!is_clipboard_paste_triggered(ctx)));
+    }
+    #[test] fn text_paste_replaces_unicode_selection_at_composer_cursor() {
+        let ctx=egui::Context::default();let id=Id::new(("chat_composer_input","fixture"));
+        let mut state=egui::text_edit::TextEditState::default();state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(4),egui::text::CCursor::new(8))));state.store(&ctx,id);
+        let mut text="Xin chào".to_string();insert_clipboard_text(&ctx,"fixture",&mut text,"bạn 🌸");assert_eq!(text,"Xin bạn 🌸");
+    }
+}
+
+
+fn clipboard_preview_rect(ui:&mut egui::Ui,pal:&ThemePalette,height:f32)->(Rect,bool) {
+    let width=ui.available_width().min(ui.clip_rect().right()-ui.next_widget_position().x).max(1.0);
+    let (rect,_)=ui.allocate_exact_size(Vec2::new(width,height),Sense::hover());
+    ui.painter().rect_filled(rect,Rounding::same(6.0),pal.bg_elevated);
+    let cancel=Rect::from_center_size(Pos2::new(rect.right()-32.0,rect.center().y),Vec2::new(48.0,26.0));
+    let response=ui.interact(cancel,ui.id().with("cancel_clipboard_attachment"),Sense::click());
+    if response.hovered(){ui.painter().rect_filled(cancel,Rounding::same(4.0),pal.bg_hover);}
+    ui.painter().text(cancel.center(),egui::Align2::CENTER_CENTER,"Hủy",FontId::proportional(12.0),pal.text_secondary);
+    (rect,response.on_hover_cursor(CursorIcon::PointingHand).clicked())
+}
+pub(super) fn render_clipboard_image(ui:&mut egui::Ui,pal:&ThemePalette,texture:&TextureHandle,width:u32,height:u32)->bool {
+    let(rect,cancel)=clipboard_preview_rect(ui,pal,60.0);
+    let [w,h]=texture.size();let scale=(48.0/w as f32).min(48.0/h as f32);
+    let thumb=Rect::from_center_size(Pos2::new(rect.left()+34.0,rect.center().y),Vec2::new(w as f32*scale,h as f32*scale));
+    ui.painter().image(texture.id(),thumb,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.0,1.0)),Color32::WHITE);
+    let text_rect=Rect::from_min_max(Pos2::new(rect.left()+68.0,rect.top()+8.0),Pos2::new(rect.right()-62.0,rect.bottom()-8.0));
+    let painter=ui.painter().with_clip_rect(text_rect);
+    painter.text(text_rect.left_top(),egui::Align2::LEFT_TOP,"Ảnh Clipboard",FontId::proportional(12.5),pal.primary);
+    painter.text(text_rect.left_top()+Vec2::new(0.0,20.0),egui::Align2::LEFT_TOP,format!("{width} × {height} px · Chờ gửi"),FontId::proportional(11.5),pal.text_secondary);
+    cancel
+}
+pub(super) fn render_clipboard_files(ui:&mut egui::Ui,pal:&ThemePalette,files:&[std::path::PathBuf])->bool {
+    let(rect,cancel)=clipboard_preview_rect(ui,pal,52.0);
+    let names=files.iter().map(|p|p.file_name().unwrap_or_default().to_string_lossy()).collect::<Vec<_>>();
+    let text_rect=Rect::from_min_max(rect.min+Vec2::new(12.0,6.0),Pos2::new(rect.right()-62.0,rect.bottom()-6.0));
+    let painter=ui.painter().with_clip_rect(text_rect);
+    painter.text(text_rect.left_top(),egui::Align2::LEFT_TOP,format!("{} tệp chờ gửi",files.len()),FontId::proportional(12.5),pal.primary);
+    painter.text(text_rect.left_top()+Vec2::new(0.0,20.0),egui::Align2::LEFT_TOP,names.iter().take(3).map(|s|s.as_ref()).collect::<Vec<_>>().join(", "),FontId::proportional(11.5),pal.text_secondary);
+    ui.interact(text_rect,ui.id().with("clipboard_file_names"),Sense::hover()).on_hover_text(names.join("\n"));
+    cancel
 }
