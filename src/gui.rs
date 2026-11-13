@@ -155,6 +155,7 @@ pub enum GuiEvent {
     },
     StatusUpdate(String),
     LoggedOut,
+    RestartForLogin,
 }
 
 #[derive(Debug, Clone)]
@@ -640,7 +641,11 @@ impl ZaloGuiApp {
     }
 
     fn check_events(&mut self, ctx: &egui::Context) {
-        while let Ok(event) = self.event_rx.try_recv() {
+        if crate::account_storage::restarting(){ctx.send_viewport_cmd(egui::ViewportCommand::Close);return;}
+        for index in 0..64 {
+            if crate::account_storage::restarting(){ctx.send_viewport_cmd(egui::ViewportCommand::Close);break;}
+            let Ok(event)=self.event_rx.try_recv() else{break;};
+            if index==63 {ctx.request_repaint();}
             match event {
                 GuiEvent::QrReady { qr_image, .. } => {
                     self.qr_texture = Some(ctx.load_texture(
@@ -671,6 +676,7 @@ impl ZaloGuiApp {
                 GuiEvent::LoginFailed(err) => {
                     self.login_in_progress = false;
                     self.login_status_msg = format!("Lỗi đăng nhập: {err}");
+                    self.qr_status=self.login_status_msg.clone();
                 }
                 GuiEvent::HistoryStatus(status) => { self.history_status=status; self.history_sync_active=true; }
                 GuiEvent::HistoryFinished(status) => { self.history_status=status; self.history_sync_active=false; }
@@ -779,6 +785,7 @@ impl ZaloGuiApp {
                     self.status_msg = format!("Trực tuyến · Cập nhật {}", crate::ui::clock());
                 }
                 GuiEvent::SessionExpired(reason) => {
+                    crate::account_storage::request_logout();ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     self.is_logged_in = false;
                     self.qr_texture = None;
                     self.qr_status = format!(
@@ -786,6 +793,7 @@ impl ZaloGuiApp {
                     );
                     self.status_msg = format!("{reason} (Lịch sử tin nhắn vẫn được bảo toàn)");
                 }
+                GuiEvent::RestartForLogin => {ctx.send_viewport_cmd(egui::ViewportCommand::Close);}
                 GuiEvent::LoggedOut => {
                     self.is_logged_in = false;
                     self.user_name.clear();
@@ -1242,6 +1250,7 @@ impl eframe::App for ZaloGuiApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.inline_video=None;
         self.settings.save();
+        if self.is_logged_in && !self.settings.remember_login && !crate::account_storage::restarting(){crate::account_storage::request_forget_on_exit();}
         if self.is_logged_in {crate::chat::save_threads_cache(&self.threads);}
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -1382,7 +1391,7 @@ impl eframe::App for ZaloGuiApp {
             egui::CentralPanel::default()
                 .frame(egui::Frame::none().fill(pal.bg_chat_canvas))
                 .show(ctx, |ui| {
-                    self.render_login_screen(ui, &pal);
+                    egui::ScrollArea::vertical().id_salt("login_scroll").auto_shrink([false,false]).show(ui,|ui|self.render_login_screen(ui,&pal));
                 });
         } else {
             self.render_chat_workspace(ctx, &pal);
@@ -1724,7 +1733,7 @@ impl ZaloGuiApp {
 
     fn render_login_screen(&mut self, ui: &mut egui::Ui, pal: &ThemePalette) {
         ui.vertical_centered(|ui| {
-            let avail_h = ui.available_height();
+            let avail_h = ui.available_height().min(ui.ctx().screen_rect().height());
             ui.add_space((avail_h * 0.08).max(20.0));
             if let Some(tex) = &self.app_logo_texture {
                 ui.image((tex.id(), Vec2::new(64.0, 64.0)));
@@ -1826,7 +1835,7 @@ impl ZaloGuiApp {
                                     ui.painter().text(
                                         rect.center(),
                                         egui::Align2::CENTER_CENTER,
-                                        "Đang tải mã QR…",
+                                        if self.login_status_msg.is_empty(){"Đang tải mã QR…"}else{"Chưa tải được mã QR"},
                                         FontId::proportional(14.5),
                                         pal.text_secondary,
                                     );
@@ -1857,6 +1866,7 @@ impl ZaloGuiApp {
                                 {
                                     self.login_in_progress = true;
                                     self.qr_status = "Đang xin mã QR…".into();
+                                    self.login_status_msg.clear();
                                     if let Some(tx) = WORKER_TX.get() {
                                         let _ = tx.send(WorkerCmd::RequestQr);
                                     }
@@ -1922,7 +1932,7 @@ impl ZaloGuiApp {
                                         if let Some(tx) = WORKER_TX.get() {
                                             let _ = tx.send(WorkerCmd::LoginPassword {
                                                 phone: self.phone_input.clone(),
-                                                pass: self.password_input.clone(),
+                                                pass: std::mem::take(&mut self.password_input),
                                             });
                                         }
                                     }

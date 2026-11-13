@@ -18,6 +18,11 @@ pub const ZPW_VER: &str = "694";
 pub const ZPW_TYPE: &str = "30";
 pub const CONFIG_DOMAIN: &str = "zaloapp.com";
 
+/// Transport failures must never erase credentials or trigger a fresh QR login.
+pub(crate) fn confirmed_session_expired(error:&str)->bool {
+    ["server error 600 ","server error 600:","server error 600 (","server error -102 ","server error -102:","server error -102 ("].iter().any(|prefix|error.contains(prefix))
+}
+
 /// Domain table.
 ///
 /// [O] **Live-verified** against a QR-authenticated Zalo Web session on 2026-10-21.
@@ -248,7 +253,7 @@ impl Session {
         }
     }
 
-    /// Check whether the current session is valid on the server.
+    /// Keep credentials unless the server explicitly confirms expiration; network failures are retryable.
     pub async fn validate_session(&self) -> bool {
         if self.login.is_none() || self.zpw_sek.is_none() {
             return false;
@@ -272,9 +277,9 @@ impl Session {
         match self.get(&url).await {
             Ok(resp) => {
                 let code = resp.get("error_code").and_then(serde_json::Value::as_i64).unwrap_or(-1);
-                code == 0
+                !matches!(code,600|-102)
             }
-            Err(_) => false,
+            Err(error) => !confirmed_session_expired(&error.to_string()),
         }
     }
 
@@ -365,6 +370,7 @@ impl Session {
 
     /// Save the authenticated session to disk so subsequent runs can restore it without re-authenticating.
     pub fn save_to_file(&self, path: &str) -> Result<()> {
+        anyhow::ensure!(!crate::account_storage::persistence_blocked(),"Đang chuyển phiên đăng nhập; không ghi lại phiên cũ");
         use base64::Engine;
         let saved = SavedSession {
             imei: self.imei.clone(),
@@ -927,4 +933,9 @@ mod tests {
         assert_eq!(redact_secret("short"), "<redacted>");
         assert_eq!(redact_secret(""), "<redacted>");
     }
+}
+
+#[cfg(test)]mod session_health_tests {
+    use super::*;
+    #[test]fn network_failures_do_not_expire_credentials(){for error in ["HTTP 503 from https://chat.zalo.me/", "connection timed out", "error sending request zpw_sek", "server error 6001 (from /api)"] {assert!(!confirmed_session_expired(error));}assert!(confirmed_session_expired("server error 600 (from /api)"));assert!(confirmed_session_expired("server error -102 (from /api)"));}
 }

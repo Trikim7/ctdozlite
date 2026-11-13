@@ -66,3 +66,7 @@ Alias API đọc được 35 mục, 32 khớp hội thoại; cache mã hóa roun
 ## 02/11/2026 — 0.1.7 gửi tệp
 
 Đã nối file_done qua socket/polling, chờ URL trước asyncfile/msg; xác nhận msgId, lỗi rõ trong hội thoại, một upload tại một thời điểm. 144 test đạt/4 ignore. Người dùng cho phép gửi một tệp văn bản thử vào Cloud: server error_code 0 + msgId + HTTPS URL; bản cài đọc lại từ lịch sử thấy Đã nhận. Native picker mở và clipboard file preview/hủy đạt, không gửi GUI vào chat người khác. Xem docs/ATTACHMENT_SEND.md.
+
+## 13/11/2026 — 0.1.8 đăng nhập/đăng xuất
+
+Đăng xuất / Đổi tài khoản ở menu avatar và Cài đặt chung. Giữ lịch sử mã hóa, tách dữ liệu từng owner và restart phiên để dừng mọi tác vụ nền cũ. Lỗi mạng tạm thời không tự xóa phiên; chặn refresh trùng, RAII polling guard, tối đa64event/frame. Tùy chọn giữ đăng nhập áp dụng khi đóng app bình thường. 152 test thường đạt; native vault fixture A/B/A và X11 GUI logout/restart/forget-on-close đạt bằng tài khoản giả, không đăng xuất hay gửi gì bằng tài khoản thật. Chưa thử QR xác nhận thật hoặc tài khoản Zalo thứ hai. Xem docs/ACCOUNT_LIFECYCLE.md.

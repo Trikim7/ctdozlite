@@ -2,7 +2,11 @@
 
 Bản fork của [ctdoteam1110/ctdozlite](https://github.com/ctdoteam1110/ctdozlite), một Zalo client không chính thức viết bằng Rust với GUI và TUI. Giữ nguyên giấy phép MIT / Apache-2.0 và ghi nhận tác giả gốc.
 
-**Phiên bản mã nguồn của fork: 0.1.7.** Các bản EXE/DEB/DMG từ repository gốc không chứa những sửa đổi dưới đây. Không dùng chúng để đánh giá bản fork.
+**Phiên bản mã nguồn của fork: 0.1.8.** Các bản EXE/DEB/DMG từ repository gốc không chứa những sửa đổi dưới đây. Không dùng chúng để đánh giá bản fork.
+
+## Bản 0.1.8 — đăng nhập, đăng xuất và ổn định phiên
+
+Có mục Đăng xuất / Đổi tài khoản trong ảnh đại diện và Cài đặt chung. Giữ lịch sử mã hóa, tách thư mục cho các tài khoản khác nhau; kết nối nền được khởi tạo sạch khi chuyển phiên. Lỗi mạng tạm thời không tự xóa phiên. Chặn làm mới trùng, tự nhả lượt polling khi bị hủy và giới hạn số sự kiện xử lý mỗi khung hình. Xem [chi tiết](docs/ACCOUNT_LIFECYCLE.md).
 
 ## Bản 0.1.7 — sửa gửi tệp
 

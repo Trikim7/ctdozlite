@@ -147,10 +147,19 @@ pub(super) fn resp_error_code(resp: &serde_json::Value) -> Option<i64> {
 }
 
 pub(super) fn is_session_expired_error(err_str: &str) -> bool {
-    err_str.contains("server error 600")
-        || err_str.contains("zpw_sek")
-        || err_str.contains("server error -102")
-        || err_str.contains("chưa đăng nhập")
+    crate::session::confirmed_session_expired(err_str) || err_str.contains("chưa đăng nhập")
+}
+
+fn login_error_message(error:&anyhow::Error)->String {
+    if error.downcast_ref::<reqwest::Error>().is_some() {
+        return "Chưa kết nối được Zalo. Kiểm tra mạng rồi thử đăng nhập lại.".into();
+    }
+    let text=error.to_string();
+    if text.contains("hết thời gian")||text.to_ascii_lowercase().contains("expired") {
+        "Mã QR đã hết hạn. Bấm Tạo / Làm mới mã QR để tiếp tục.".into()
+    }else if text.contains("http://")||text.contains("https://") {
+        "Chưa đăng nhập được. Hãy làm mới mã QR hoặc thử lại.".into()
+    }else{text.chars().take(240).collect()}
 }
 
 pub(super) static PERSIST_SLOT: std::sync::OnceLock<std::sync::Arc<memory::Latest<Vec<Thread>>>> = std::sync::OnceLock::new();
@@ -187,10 +196,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                 .unwrap();
 
             rt.block_on(async move {
-                {
-                    let s = session.lock().await.clone();
-                    let _ = crate::login::get_server_info(&s).await;
-                }
+
                 {
                     let s_kw = session.clone();
                     let gui_tx_kw = gui_tx.clone();
@@ -443,211 +449,49 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                             }));
                         }
                         WorkerCmd::Logout => {
-                            if let Some(task)=phone_task.take(){task.abort();}
-                            phone_cancel=None;
-                            if let Some(task)=history_task.take() {task.abort();}
-                            if let Some(task) = current_qr_task.take() {
-                                task.abort();
-                            }
-                            let _ = std::fs::remove_file("session.json");
-                            let _ = std::fs::remove_file("threads_cache.json");
-                            let _ = std::fs::remove_file("zalo_history.db");
-                            {
-                                let mut s = session.lock().await;
-                                s.logout();
-                            }
-                            {
-                                let mut ps = poll_state.lock().await;
-                                *ps = crate::chat::PollState::default();
-                            }
-                            let _ = gui_tx.send(GuiEvent::LoggedOut);
-                            egui_ctx.request_repaint();
+                            crate::account_storage::request_logout();
+                            let _=gui_tx.send(GuiEvent::LoggedOut);egui_ctx.request_repaint();
                         }
                         WorkerCmd::RequestQr => {
-                            if let Some(task)=phone_task.take(){task.abort();}
-                            phone_cancel=None;
-                            if let Some(task)=history_task.take() {task.abort();}
-                            if let Some(task) = current_qr_task.take() {
-                                task.abort();
-                            }
-                            let session_clone = session.clone();
-                            let poll_clone = poll_state.clone();
-                            let gui_tx_clone = gui_tx.clone();
-                            let ctx_clone = egui_ctx.clone();
-
-                            let handle = tokio::spawn(async move {
-                                {
-                                    let mut s = session_clone.lock().await;
-                                    s.logout();
-                                }
-                                {
-                                    let mut ps = poll_clone.lock().await;
-                                    *ps = crate::chat::PollState::default();
-                                }
-                                let _ = gui_tx_clone
-                                    .send(GuiEvent::StatusUpdate("Đang xin mã QR mới…".into()));
-                                ctx_clone.request_repaint();
-
-                                let s_snap = { session_clone.lock().await.clone() };
-                                let q_res = crate::qr::request_qr(&s_snap, "vi").await;
-
-                                match q_res {
-                                    Ok(q) => {
-                                        if let Some(payload) = q.payload() {
-                                            if let Ok(code) = qrcode::QrCode::new(payload.as_bytes())
-                                            {
-                                                let w = code.width();
-                                                let quiet_zone = 4;
-                                                let total_w = w + quiet_zone * 2;
-                                                let mut pixels =
-                                                    Vec::with_capacity(total_w * total_w * 4);
-                                                for y in 0..total_w {
-                                                    for x in 0..total_w {
-                                                        let in_qr = x >= quiet_zone
-                                                            && x < quiet_zone + w
-                                                            && y >= quiet_zone
-                                                            && y < quiet_zone + w;
-                                                        let dark = in_qr
-                                                            && (code[(
-                                                                x - quiet_zone,
-                                                                y - quiet_zone,
-                                                            )] == qrcode::Color::Dark);
-                                                        let c = if dark {
-                                                            [15, 23, 42, 255]
-                                                        } else {
-                                                            [255, 255, 255, 255]
-                                                        };
-                                                        pixels.extend_from_slice(&c);
-                                                    }
-                                                }
-                                                let img = egui::ColorImage::from_rgba_unmultiplied(
-                                                    [total_w, total_w],
-                                                    &pixels,
-                                                );
-                                                let _ = gui_tx_clone.send(GuiEvent::QrReady {
-                                                    qr_login: q.clone(),
-                                                    qr_image: img,
-                                                });
-                                                ctx_clone.request_repaint();
-
-                                                let scan_res =
-                                                    crate::qr::wait_for_scan(&s_snap, &q).await;
-
-                                                if let Ok(scanned) = scan_res {
-                                                    let name = scanned
-                                                        .get("display_name")
-                                                        .and_then(|v| v.as_str())
-                                                        .unwrap_or("Zalo User");
-                                                    let _ =
-                                                        gui_tx_clone.send(GuiEvent::QrScanned {
-                                                            name: name.to_string(),
-                                                        });
-                                                    ctx_clone.request_repaint();
-
-                                                    let confirm_res =
-                                                        crate::qr::confirm(&s_snap, &q).await;
-
-                                                    if let Ok(resp) = confirm_res {
-                                                        let mut s = session_clone.lock().await;
-                                                        if let Some(sek) =
-                                                            crate::qr::extract_zpw_sek(&resp)
-                                                        {
-                                                            s.set_zpw_sek(sek);
-                                                        }
-                                                        if let Some(data) = resp.get("data") {
-                                                            crate::login::apply_login_config(
-                                                                &mut s, data,
-                                                            );
-                                                        }
-                                                        let _ = s.save_to_file("session.json");
-
-                                                        if let Ok(info) =
-                                                            crate::login::get_login_info(&s).await
-                                                        {
-                                                            if let Some(cfg) = info.get("data") {
-                                                                crate::login::apply_login_config(
-                                                                    &mut s, cfg,
-                                                                );
-                                                                s.apply_server_info(cfg);
-                                                            }
-                                                        }
-                                                        let _ = s.sync_profile_me().await;
-                                                        let _ = s.save_to_file("session.json");
-
-                                                        let uin = s
-                                                            .login
-                                                            .as_ref()
-                                                            .map(|l| l.uin.clone())
-                                                            .unwrap_or_default();
-                                                        let dname = s
-                                                            .login
-                                                            .as_ref()
-                                                            .map(|l| l.display_name.clone())
-                                                            .unwrap_or_default();
-                                                        let u_ava = s
-                                                            .login
-                                                            .as_ref()
-                                                            .map(|l| l.avatar.clone())
-                                                            .filter(|a| !a.is_empty());
-                                                        let _ = gui_tx_clone.send(
-                                                            GuiEvent::LoginSuccess {
-                                                                name: dname,
-                                                                uin,
-                                                                avatar: u_ava,
-                                                            },
-                                                        );
-                                                        ctx_clone.request_repaint();
-
-                                                        let mut list = crate::chat::get_friends(&s)
-                                                            .await
-                                                            .unwrap_or_default();
-                                                        crate::store::load_history_into_threads(
-                                                            "zalo_history.db",
-                                                            &mut list,
-                                                            200,
-                                                        );
-                                                        {
-                                                            let mut ps = poll_clone.lock().await;
-                                                            let _ = crate::chat::poll_new_messages(
-                                                                &s, &mut ps, &mut list,
-                                                            )
-                                                            .await;
-                                                        }
-                                                        let _ = gui_tx_clone
-                                                            .send(GuiEvent::ThreadsUpdated(list));
-                                                        ctx_clone.request_repaint();
-
-                                                        let s_kw = s.clone();
-                                                        let tx_kw = gui_tx_clone.clone();
-                                                        let ctx_kw = ctx_clone.clone();
-                                                        tokio::spawn(async move {
-                                                            if let Ok(kws) = crate::chat::fetch_sticker_suggest_keywords(&s_kw).await {
-                                                                if !kws.is_empty() {
-                                                                    let _ = tx_kw.send(GuiEvent::StickerSuggestKeywordsLoaded(kws));
-                                                                    ctx_kw.request_repaint();
-                                                                }
-                                                            }
-                                                        });
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        let _ = gui_tx_clone
-                                            .send(GuiEvent::LoginFailed(e.to_string()));
-                                        ctx_clone.request_repaint();
-                                    }
-                                }
-                            });
-                            current_qr_task = Some(handle);
+                            if let Some(task)=current_qr_task.take(){task.abort();}
+                            let mut local=session.lock().await.clone();local.logout();
+                            let tx=gui_tx.clone();let ctx=egui_ctx.clone();
+                            current_qr_task=Some(tokio::spawn(async move {
+                                let result: anyhow::Result<()>=async {
+                                    let q=crate::qr::request_qr(&local,"vi").await?;
+                                    let payload=q.payload().ok_or_else(||anyhow::anyhow!("Máy chủ không trả mã QR"))?;
+                                    let code=qrcode::QrCode::new(payload.as_bytes())?;
+                                    let w=code.width();let total=w+8;let mut pixels=Vec::with_capacity(total*total*4);
+                                    for y in 0..total {for x in 0..total {
+                                        let dark=x>=4&&x<w+4&&y>=4&&y<w+4&&code[(x-4,y-4)]==qrcode::Color::Dark;
+                                        pixels.extend_from_slice(if dark {&[15,23,42,255]}else{&[255,255,255,255]});
+                                    }}
+                                    let image=egui::ColorImage::from_rgba_unmultiplied([total,total],&pixels);
+                                    let _=tx.send(GuiEvent::QrReady{qr_login:q.clone(),qr_image:image});ctx.request_repaint();
+                                    let scanned=crate::qr::wait_for_scan(&local,&q).await?;
+                                    let name=scanned.get("display_name").and_then(|v|v.as_str()).unwrap_or("Người dùng Zalo").to_owned();
+                                    let _=tx.send(GuiEvent::QrScanned{name});ctx.request_repaint();
+                                    let response=crate::qr::confirm(&local,&q).await?;
+                                    if let Some(sek)=crate::qr::extract_zpw_sek(&response){local.set_zpw_sek(sek);}
+                                    if let Some(data)=response.get("data"){crate::login::apply_login_config(&mut local,data);}
+                                    let info=crate::login::get_login_info(&local).await?;
+                                    if let Some(data)=info.get("data"){crate::login::apply_login_config(&mut local,data);local.apply_server_info(data);}
+                                    let _=local.sync_profile_me().await;
+                                    crate::account_storage::stage_login(&local)?;
+                                    let _=tx.send(GuiEvent::RestartForLogin);ctx.request_repaint();Ok(())
+                                }.await;
+                                if let Err(error)=result{let _=tx.send(GuiEvent::LoginFailed(login_error_message(&error)));ctx.request_repaint();}
+                            }));
                         }
                         WorkerCmd::RefreshThreads => {
+                            static REFRESHING:std::sync::atomic::AtomicBool=std::sync::atomic::AtomicBool::new(false);
+                            let Some(refresh_guard)=memory::WorkGuard::claim(&REFRESHING) else{continue;};
                             let session_clone = session.clone();
                             let poll_clone = poll_state.clone();
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
                             tokio::spawn(async move {
+                                let _guard=refresh_guard;
                                 let mut s = session_clone.lock().await.clone();
                                 if s.login.is_some() {
                                     if !s.validate_session().await {
@@ -688,8 +532,10 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                             avatar: u_ava,
                                         });
                                     }
-                                    let mut list =
-                                        crate::chat::get_friends(&s).await.unwrap_or_default();
+                                    let mut list=match crate::chat::get_friends(&s).await {
+                                        Ok(list)=>list,
+                                        Err(_)=>{let _=gui_tx_clone.send(GuiEvent::StatusUpdate("Chưa kết nối được Zalo. Giữ nguyên lịch sử; hãy thử làm mới khi mạng ổn định.".into()));ctx_clone.request_repaint();return;}
+                                    };
                                     crate::store::load_history_into_threads(
                                         "zalo_history.db",
                                         &mut list,
@@ -709,15 +555,14 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                         WorkerCmd::PollMessages { known_threads } => {
                             static IS_POLLING: std::sync::atomic::AtomicBool =
                                 std::sync::atomic::AtomicBool::new(false);
-                            if IS_POLLING.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                                continue;
-                            }
+                            let Some(poll_guard)=memory::WorkGuard::claim(&IS_POLLING) else{continue;};
 
                             let session_clone = session.clone();
                             let poll_clone = poll_state.clone();
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
                             tokio::spawn(async move {
+                                let _guard=poll_guard;
                                 let s = session_clone.lock().await.clone();
                                 if s.login.is_some() {
                                     let mut temp_threads: Vec<Thread> = known_threads
@@ -796,7 +641,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                         }
                                     }
                                 }
-                                IS_POLLING.store(false, std::sync::atomic::Ordering::SeqCst);
+
                             });
                         }
                         WorkerCmd::LoadGroupHistory { group_id, is_group } => {
@@ -1748,74 +1593,23 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                             });
                         }
                         WorkerCmd::LoginPassword { phone, pass } => {
-                            let session_clone = session.clone();
-                            let poll_clone = poll_state.clone();
-                            let gui_tx_clone = gui_tx.clone();
-                            let ctx_clone = egui_ctx.clone();
-                            tokio::spawn(async move {
-                                let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(
-                                    "Đang xác thực tài khoản…".into(),
-                                ));
-                                ctx_clone.request_repaint();
-                                let mut s = session_clone.lock().await;
-                                match crate::login::login_by_password(&mut s, &phone, &pass, "VN")
-                                    .await
-                                {
-                                    Ok(_) => {
-                                        if let Ok(info) = crate::login::get_login_info(&s).await {
-                                            if let Some(cfg) = info.get("data") {
-                                                crate::login::apply_login_config(&mut s, cfg);
-                                                s.apply_server_info(cfg);
-                                                let _ = s.save_to_file("session.json");
-
-                                                let uin = s
-                                                    .login
-                                                    .as_ref()
-                                                    .map(|l| l.uin.clone())
-                                                    .unwrap_or_default();
-                                                let name = s
-                                                    .login
-                                                    .as_ref()
-                                                    .map(|l| l.display_name.clone())
-                                                    .unwrap_or_default();
-                                                let u_ava = s
-                                                    .login
-                                                    .as_ref()
-                                                    .map(|l| l.avatar.clone())
-                                                    .filter(|a| !a.is_empty());
-                                                let _ = gui_tx_clone.send(GuiEvent::LoginSuccess {
-                                                    name,
-                                                    uin,
-                                                    avatar: u_ava,
-                                                });
-                                                ctx_clone.request_repaint();
-
-                                                if let Ok(mut list) =
-                                                    crate::chat::get_friends(&s).await
-                                                {
-                                                    {
-                                                        let mut ps = poll_clone.lock().await;
-                                                        *ps = crate::chat::PollState::default();
-                                                        let _ = crate::chat::poll_new_messages(
-                                                            &s, &mut ps, &mut list,
-                                                        )
-                                                        .await;
-                                                    }
-                                                    let _ = gui_tx_clone
-                                                        .send(GuiEvent::ThreadsUpdated(list));
-                                                    ctx_clone.request_repaint();
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        let _ = gui_tx_clone
-                                            .send(GuiEvent::LoginFailed(e.to_string()));
-                                        ctx_clone.request_repaint();
-                                    }
-                                }
-                            });
+                            if let Some(task)=current_qr_task.take(){task.abort();}
+                            let mut local=session.lock().await.clone();local.logout();
+                            let tx=gui_tx.clone();let ctx=egui_ctx.clone();
+                            current_qr_task=Some(tokio::spawn(async move {
+                                let pass=zeroize::Zeroizing::new(pass);
+                                let result:anyhow::Result<()>=async {
+                                    crate::login::login_by_password(&mut local,&phone,&pass,"VN").await?;
+                                    let info=crate::login::get_login_info(&local).await?;
+                                    if let Some(data)=info.get("data"){crate::login::apply_login_config(&mut local,data);local.apply_server_info(data);}
+                                    let _=local.sync_profile_me().await;
+                                    crate::account_storage::stage_login(&local)?;
+                                    let _=tx.send(GuiEvent::RestartForLogin);ctx.request_repaint();Ok(())
+                                }.await;
+                                if let Err(error)=result{let _=tx.send(GuiEvent::LoginFailed(login_error_message(&error)));ctx.request_repaint();}
+                            }));
                         }
+
                     }
                 }
             });
@@ -1823,3 +1617,8 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
         .expect("Failed to spawn zalo-worker thread");
 }
 
+
+#[cfg(test)]mod login_message_tests {
+    use super::*;
+    #[test]fn login_errors_hide_request_urls(){let text=login_error_message(&anyhow::anyhow!("error at https://example.test/?signkey=private"));assert!(!text.contains("http"));assert!(!text.contains("private"));assert!(login_error_message(&anyhow::anyhow!("hết thời gian chờ quét QR")).contains("hết hạn"));}
+}

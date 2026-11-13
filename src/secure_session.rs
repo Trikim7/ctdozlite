@@ -182,10 +182,26 @@ pub fn save(path: &Path, session: &crate::session::SavedSession) -> Result<()> {
     let _lock = SAVE_LOCK
         .lock()
         .map_err(|_| anyhow::anyhow!("Khóa lưu phiên bị lỗi"))?;
+    anyhow::ensure!(!crate::account_storage::persistence_blocked(),"Đang đóng hoặc chuyển phiên đăng nhập");
     let _file_lock = lock_session_file(path)?;
     let plaintext = Zeroizing::new(serde_json::to_vec(session)?);
     let bytes = seal(&plaintext, &Vault::for_path(path)?)?;
     crate::storage::atomic_write(path, &bytes)
+}
+
+/// Serialize logout with in-flight writers, without deleting the path-bound vault key.
+pub(crate) fn remove_saved_session(path:&Path)->Result<()> {
+    let _lock=SAVE_LOCK.lock().map_err(|_|anyhow::anyhow!("Khóa lưu phiên bị lỗi"))?;
+    let _file_lock=lock_session_file(path)?;
+    match std::fs::remove_file(path) {
+        Ok(())=>{
+            #[cfg(unix)]
+            std::fs::File::open(path.parent().filter(|p|!p.as_os_str().is_empty()).unwrap_or(Path::new(".")))?.sync_all()?;
+            Ok(())
+        },
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>Ok(()),
+        Err(error)=>Err(error).context("Không thể xóa phiên đăng nhập khỏi máy"),
+    }
 }
 
 pub fn load(path: &Path) -> Result<crate::session::SavedSession> {

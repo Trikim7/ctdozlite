@@ -1,15 +1,13 @@
 //! Private application data and atomic file writes. No credentials belong in the working directory.
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Initialize before starting threads, so existing relative cache paths stay inside user app data.
 pub fn init_data_directory() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("net", "Trikim7", "ctdozlite")
-        .context("Không xác định được thư mục dữ liệu riêng của người dùng")?;
-    let path = dirs.data_local_dir();
-    create_private_directory(path)?;
-    let path = path.canonicalize()?;
+    let base=crate::account_storage::root()?;
+    let path=crate::account_storage::selected_directory(&base)?;
+    let path=path.canonicalize()?;
     std::env::set_current_dir(&path)?;
     Ok(path)
 }

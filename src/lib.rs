@@ -1,3 +1,4 @@
+pub mod account_storage;
 pub mod audio;
 pub mod call;
 pub mod chat;

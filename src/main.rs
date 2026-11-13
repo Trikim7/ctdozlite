@@ -4,6 +4,7 @@
 
 #![allow(dead_code)]
 
+mod account_storage;
 mod attachment_events;
 mod audio;
 mod call;
@@ -50,10 +51,27 @@ async fn main() -> Result<()> {
     let force_qr = args.iter().any(|a| a == "--qr");
     let force_logout = args.iter().any(|a| a == "--logout");
 
+        use fs2::FileExt;
+        let mut options=std::fs::OpenOptions::new();options.create(true).truncate(false).read(true).write(true);
+        #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
+        let _instance=options.open(account_storage::root()?.join("gui-instance.lock"))?;
+        let mut attempts=0;
+        loop {
+            match _instance.try_lock_exclusive() {
+                Ok(())=>break,
+                Err(error) if error.kind()==std::io::ErrorKind::WouldBlock && args.iter().any(|a|a=="--restart-wait") && attempts<200=>{
+                    attempts+=1;std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(error) if error.kind()==std::io::ErrorKind::WouldBlock=>{
+                    let _=storage::atomic_write(std::path::Path::new("activate.request"),b"activate");return Ok(());
+                }
+                Err(error)=>return Err(error.into()),
+            }
+        }
+
     if force_logout {
-        let _ = std::fs::remove_file("session.json");
-        let _ = std::fs::remove_file("threads_cache.json");
-        println!("✓ Đã đăng xuất và xóa phiên lưu trữ cũ (session.json, threads_cache.json).");
+        account_storage::finish_logout()?;
+        println!("Đã đăng xuất khỏi máy này. Lịch sử mã hóa được giữ lại.");
         if !force_gui && !force_tui && !force_qr {
             return Ok(());
         }
@@ -86,22 +104,13 @@ async fn main() -> Result<()> {
         false
     };
 
+    if session_restored {account_storage::bind_restored(&s.login.as_ref().unwrap().uin)?;}
+
     // Determine launch mode:
     // If `--gui` is specified (or default when not `--tui` / `--qr` / `--phone`):
     // Open the native GUI window IMMEDIATELY without blocking on network requests!
     // Background worker in `gui.rs` handles `get_server_info`, `get_friends`, and `poll_new_messages`.
     if force_gui || (!force_tui && !force_qr && !args.iter().any(|a| a.starts_with("--phone"))) {
-        use fs2::FileExt;
-        let mut options=std::fs::OpenOptions::new();options.create(true).truncate(false).read(true).write(true);
-        #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
-        let _instance=options.open("gui-instance.lock")?;
-        if let Err(error)=_instance.try_lock_exclusive() {
-            if error.kind()==std::io::ErrorKind::WouldBlock {
-                let _=storage::atomic_write(std::path::Path::new("activate.request"),b"activate");
-                return Ok(());
-            }
-            return Err(error.into());
-        }
         println!("🚀 Đang khởi chạy giao diện đồ họa Zalo GUI (egui)…");
         #[cfg(target_os = "windows")]
         if !dev_mode {
@@ -138,7 +147,7 @@ async fn main() -> Result<()> {
 
         let app_session = s;
         let sync_phone=args.iter().any(|arg|arg=="--sync-phone");
-        return eframe::run_native(
+        let result=eframe::run_native(
             "Zalo - Rust Native Client",
             native_options,
             Box::new(move |cc| {
@@ -148,6 +157,15 @@ async fn main() -> Result<()> {
             }),
         )
         .map_err(|e| anyhow::anyhow!("Không thể khởi chạy GUI: {e}"));
+        result?;
+        if account_storage::forgetting(){account_storage::finish_logout()?;}
+        if account_storage::restarting() {
+            if account_storage::logging_out(){account_storage::finish_logout()?;}
+            // The successor waits for this process to exit and release the global instance lock.
+            std::process::Command::new(std::env::current_exe()?).args(["--gui","--restart-wait"]).spawn()?;
+            std::process::exit(0);
+        }
+        return Ok(());
     }
 
     // 1. Initial server info check for TUI mode
@@ -170,7 +188,6 @@ async fn main() -> Result<()> {
         } else {
             println!("⚠️ Phiên đăng nhập trong session.json đã hết hạn. Đang chuyển sang đăng nhập mới…");
             let _ = std::fs::remove_file("session.json");
-            let _ = std::fs::remove_file("threads_cache.json");
             s.logout();
             false
         }
@@ -215,6 +232,8 @@ async fn main() -> Result<()> {
             }
         }
     }
+
+    if let Some(login)=s.login.as_ref(){account_storage::bind_restored(&login.uin)?;}
 
     // Fetch initial threads and hydrate with local SQLite history
     let mut initial_threads = chat::load_threads_cache();

@@ -130,7 +130,7 @@ impl ZaloGuiApp {
                             .add_sized(
                                 [200.0, 30.0],
                                 egui::Button::new(
-                                    RichText::new("Đăng xuất tài khoản")
+                                    RichText::new("Đăng xuất / Đổi tài khoản")
                                         .size(12.5)
                                         .color(pal.danger)
                                         .strong(),
@@ -179,21 +179,8 @@ impl ZaloGuiApp {
         }
 
         if do_logout {
-            self.is_logged_in = false;
-            self.user_name.clear();
-            self.user_uin.clear();
-            self.threads.clear();
-            self.selected_thread_index = 0;
-            self.qr_texture = None;
-            self.login_status_msg.clear();
-            self.qr_status = "Đang xin mã QR mới…".into();
-            self.status_msg = "Đã đăng xuất".into();
-            let _ = std::fs::remove_file("session.json");
-            let _ = std::fs::remove_file("threads_cache.json");
-            if let Some(tx) = WORKER_TX.get() {
-                let _ = tx.send(WorkerCmd::Logout);
-                let _ = tx.send(WorkerCmd::RequestQr);
-            }
+            crate::account_storage::request_logout();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         if close_menu {
             self.profile_menu_open = false;
@@ -656,6 +643,12 @@ impl ZaloGuiApp {
                                 if !geometry.compact {ui.label(RichText::new(tab_title).size(15.0).strong().color(pal.text_primary));ui.add_space(18.0);}
                                 match self.settings_tab {
                                         SettingsTab::General => {
+                                            ui.label(RichText::new("Tài khoản").strong().size(14.0));
+                                            ui.label(&self.user_name);
+                                            ui.label(RichText::new("Lịch sử mã hóa được giữ riêng cho từng tài khoản trên máy.").color(pal.text_secondary));
+                                            if ui.button("Đăng xuất / Đổi tài khoản").clicked(){crate::account_storage::request_logout();ctx.send_viewport_cmd(egui::ViewportCommand::Close);}
+                                            ui.add_space(12.0);
+
                                             ui.label(RichText::new("Danh bạ").color(pal.text_primary).size(13.5).strong());
                                             ui.add_space(2.0);
                                             ui.label(RichText::new("Hiển thị danh bạ trong Zalo, bạn có thể chọn hiển thị tất cả danh bạ hoặc chỉ những bạn bè đang sử dụng Zalo").color(pal.text_secondary).size(12.0));
@@ -712,7 +705,7 @@ impl ZaloGuiApp {
                                                     });
                                                     ui.add_space(8.0);
                                                     ui.horizontal_wrapped(|ui| {
-                                                        ui.label(RichText::new("Ghi nhớ tài khoản đăng nhập lần trước").color(pal.text_primary).size(13.2));
+                                                        ui.label(RichText::new("Giữ đăng nhập khi đóng ứng dụng").color(pal.text_primary).size(13.2));
                                                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                                             render_toggle_switch(ui, &mut self.settings.remember_login, pal);
                                                         });

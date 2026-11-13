@@ -222,3 +222,16 @@ mod tests {
         assert!(permits.clone().try_acquire_owned().is_ok());
     }
 }
+
+/// Release an in-flight flag on return, cancellation and unwind, not only the success path.
+pub(super) struct WorkGuard(&'static std::sync::atomic::AtomicBool);
+impl WorkGuard {
+    pub(super) fn claim(flag:&'static std::sync::atomic::AtomicBool)->Option<Self>{
+        flag.compare_exchange(false,true,std::sync::atomic::Ordering::AcqRel,std::sync::atomic::Ordering::Acquire).ok().map(|_|Self(flag))
+    }
+}
+impl Drop for WorkGuard{fn drop(&mut self){self.0.store(false,std::sync::atomic::Ordering::Release);}}
+#[cfg(test)]mod work_guard_tests {
+    use super::*;
+    #[tokio::test]async fn cancellation_releases_the_slot(){static FLAG:std::sync::atomic::AtomicBool=std::sync::atomic::AtomicBool::new(false);let guard=WorkGuard::claim(&FLAG).unwrap();assert!(WorkGuard::claim(&FLAG).is_none());let (tx,rx)=tokio::sync::oneshot::channel();let task=tokio::spawn(async move {let _guard=guard;let _=tx.send(());std::future::pending::<()>().await;});rx.await.unwrap();task.abort();let _=task.await;assert!(WorkGuard::claim(&FLAG).is_some());}
+}
