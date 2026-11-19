@@ -345,26 +345,6 @@ impl MessageStore {
                     existing.name = st.name;
                 }
                 existing.is_group = existing.is_group || st.is_group;
-            } else if !crate::chat::is_generic_thread_name(&st.name)
-                && threads
-                    .iter()
-                    .any(|t| t.is_group == st.is_group && t.name.trim() == st.name.trim())
-            {
-                // Migrate stale session-scoped `thread_id` in SQLite to the active contact's `id`
-                if let Some(live_id) = threads
-                    .iter()
-                    .find(|t| t.is_group == st.is_group && t.name.trim() == st.name.trim())
-                    .map(|t| t.id.clone())
-                {
-                    let _ = self.conn.execute(
-                        "UPDATE messages SET thread_id = ?1 WHERE thread_id = ?2",
-                        params![live_id, st.thread_id],
-                    );
-                    let _ = self.conn.execute(
-                        "DELETE FROM threads WHERE thread_id = ?1",
-                        params![st.thread_id],
-                    );
-                }
             } else {
                 threads.push(Thread {
                     id: st.thread_id.clone(),
@@ -413,6 +393,7 @@ impl MessageStore {
                 );
             }
             let saved_msgs = self.messages_for(&t.id, limit_per_thread)?;
+            let mut message_index = crate::chat::MessageIndex::new(&t.messages);
             for sm in saved_msgs {
                 if sm.text == "sendBubbleMessage" {
                     self.conn
@@ -523,15 +504,13 @@ impl MessageStore {
                     link_thumb,
                     link_src,
                 };
-                if let Some(existing) = t.messages.iter_mut().find(|existing| {
-                    (!existing.id.is_empty() && existing.id == cm.id)
-                        || (existing.text == cm.text
-                            && existing.is_outgoing == cm.is_outgoing
-                            && (existing.ts == cm.ts
-                                || (existing.ts != 0
-                                    && cm.ts != 0
-                                    && (existing.ts - cm.ts).abs() < 5000)))
-                }) {
+                if let Some(i) = message_index.find(&t.messages, &cm) {
+                    let existing = &mut t.messages[i];
+                    if (existing.id.starts_with("out_") || existing.id.starts_with("local_"))
+                        && !cm.id.is_empty() && !cm.id.starts_with("out_") && !cm.id.starts_with("local_") {
+                        existing.id=cm.id.clone();
+                        message_index.insert(i,existing);
+                    }
                     if existing.sticker_id.is_none() && cm.sticker_id.is_some() {
                         existing.sticker_id = cm.sticker_id;
                         existing.sticker_cate_id = cm.sticker_cate_id;
@@ -558,6 +537,7 @@ impl MessageStore {
                     existing.is_pinned = existing.is_pinned || cm.is_pinned;
                     existing.is_starred = existing.is_starred || cm.is_starred;
                 } else {
+                    message_index.insert(t.messages.len(), &cm);
                     t.messages.push(cm);
                     loaded_count += 1;
                 }
@@ -909,6 +889,26 @@ mod tests {
         assert!(persist_threads(&mut store,&[thread]).is_err());
         assert!(store.messages_for("rollback-thread",10).unwrap().is_empty());
         assert!(store.all_threads().unwrap().is_empty());
+    }
+
+    #[test]
+    fn hydrate_keeps_same_name_contacts_separate() {
+        let mut store=MessageStore::open(":memory:").unwrap();
+        let thread=|id:&str,msgid:&str|Thread {id:id.into(),name:"Trùng tên".into(),
+            preview:String::new(),time:String::new(),avatar:None,is_group:false,
+            messages:vec![ChatMessage{id:msgid.into(),text:"hello".into(),ts:1000,..Default::default()}]};
+        let a=thread("contact-a","message-a");
+        let b=thread("contact-b","message-b");
+        persist_threads(&mut store,&[a.clone(),b.clone()]).unwrap();
+        let mut loaded=vec![b];
+        store.hydrate_threads(&mut loaded,50).unwrap();
+        assert_eq!(loaded.len(),2);
+        for (id,msgid) in [("contact-a","message-a"),("contact-b","message-b")] {
+            let t=loaded.iter().find(|t|t.id==id).unwrap();
+            assert_eq!(t.messages.len(),1);
+            assert_eq!(t.messages[0].id,msgid);
+            assert_eq!(store.messages_for(id,50).unwrap()[0].msg_id,msgid);
+        }
     }
 
     #[test]

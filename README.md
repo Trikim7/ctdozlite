@@ -2,7 +2,13 @@
 
 Bản fork của [ctdoteam1110/ctdozlite](https://github.com/ctdoteam1110/ctdozlite), một Zalo client không chính thức viết bằng Rust với GUI và TUI. Giữ nguyên giấy phép MIT / Apache-2.0 và ghi nhận tác giả gốc.
 
-**Phiên bản mã nguồn của fork: 0.1.9.** Các bản EXE/DEB/DMG từ repository gốc không chứa những sửa đổi dưới đây. Không dùng chúng để đánh giá bản fork.
+**Phiên bản mã nguồn của fork: 0.2.0.** Các bản EXE/DEB/DMG từ repository gốc không chứa những sửa đổi dưới đây. Không dùng chúng để đánh giá bản fork.
+
+## Bản 0.2.0 — tối ưu lịch sử và giao diện
+
+Áp dụng chọn lọc ba cải tiến upstream: hiển thị 150 tin mới nhất và mở thêm theo trang, bỏ lượt polling không đổi và cache danh sách hội thoại, hợp nhất tin nhắn bằng chỉ mục ID. Tìm kiếm và lọc tin đánh dấu vẫn trên toàn bộ lịch sử đã nạp. Tách hội thoại theo ID, không tự chuyển lịch sử khi trùng tên hoặc ảnh đại diện. Giữ nguyên dữ liệu mã hóa và giới hạn ảnh/tệp hiện có.
+
+Nguồn tham khảo: [cửa sổ chat](https://github.com/ctdoteam1110/ctdozlite/commit/a6656f4), [PR #136](https://github.com/ctdoteam1110/ctdozlite/pull/136), [chỉ mục hợp nhất](https://github.com/ctdoteam1110/ctdozlite/commit/ba2484e), [định danh hội thoại](https://github.com/ctdoteam1110/ctdozlite/pull/61).
 
 ## Bản 0.1.9 — soạn tin, gửi tệp và thông báo
 

@@ -334,6 +334,10 @@ pub struct ZaloGuiApp {
     // Chat screen state
     threads: Vec<Thread>,
     selected_thread_index: usize,
+    chat_render_window: (String, usize),
+    chat_scroll_anchor: Option<String>,
+    sidebar_revision: u64,
+    sidebar_cache: Option<(u64, String, ThreadFilter, Vec<usize>)>,
     thread_filter: ThreadFilter,
     search_query: String,
     input_message: String,
@@ -423,7 +427,6 @@ pub struct ZaloGuiApp {
     event_tx: Sender<GuiEvent>,
 
     // Background poll trigger
-    last_poll: std::time::Instant,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -524,6 +527,10 @@ impl ZaloGuiApp {
             qr_status: "Đang tạo mã QR đăng nhập…".into(),
             threads,
             selected_thread_index,
+            chat_render_window: (String::new(), 150),
+            chat_scroll_anchor: None,
+            sidebar_revision: 0,
+            sidebar_cache: None,
             thread_filter: ThreadFilter::All,
             search_query: String::new(),
             input_message: String::new(),
@@ -609,13 +616,13 @@ impl ZaloGuiApp {
             scanner_findings: Vec::new(),
             event_rx: rx,
             event_tx: tx.clone(),
-            last_poll: std::time::Instant::now(),
         };
 
         spawn_session_worker(session, tx, cc.egui_ctx.clone());
 
         if let Some(wtx) = WORKER_TX.get() {
             if is_logged_in {
+                let _ = wtx.send(WorkerCmd::UpdatePollThreads { known_threads: app.poll_thread_metadata() });
                 let _ = wtx.send(WorkerCmd::RefreshThreads);
             } else {
                 let _ = wtx.send(WorkerCmd::RequestQr);
@@ -642,6 +649,9 @@ impl ZaloGuiApp {
         if let Some(tx)=WORKER_TX.get(){self.clipboard_loading=true;let _=tx.send(WorkerCmd::ReadClipboard {thread_id:thread_id.to_owned(),fallback});}
     }
 
+    fn poll_thread_metadata(&self) -> Vec<(String, String, bool)> {
+        self.threads.iter().map(|t|(t.id.clone(),t.name.clone(),t.is_group)).collect()
+    }
     fn persist_threads_async(&self) {
         self.persistence_dirty.set(true);
     }
@@ -671,6 +681,7 @@ impl ZaloGuiApp {
                     self.is_logged_in = true;
                     self.user_name = name;
                     self.nicknames=crate::nicknames::load(&uin);self.alias_sync_pending=false;self.last_alias_sync=std::time::Instant::now()-Duration::from_secs(301);
+                    self.sidebar_revision=self.sidebar_revision.wrapping_add(1);
                     self.user_uin = uin;
                     if avatar.is_some() {
                         self.user_avatar = avatar;
@@ -688,17 +699,21 @@ impl ZaloGuiApp {
                 GuiEvent::HistoryFinished(status) => { self.history_status=status; self.history_sync_active=false; }
                 GuiEvent::HistoryUpdated(updates) => {
                     let selected=self.threads.get(self.selected_thread_index).map(|t|t.id.clone());
-                    for incoming in updates {
+                    let mut changed=false;
+                    for mut incoming in updates {
+                        if incoming.id.is_empty() || incoming.id=="0" {continue;}
+                        crate::chat::normalize_thread_times(std::slice::from_mut(&mut incoming));
                         if let Some(existing)=self.threads.iter_mut().find(|t|t.id==incoming.id) {
-                            crate::chat::merge_thread_into(existing,incoming,true);
-                        } else { self.threads.push(incoming); }
+                            changed |= crate::chat::merge_thread_into(existing,incoming,true);
+                        } else { self.threads.push(incoming);changed=true; }
                     }
-                    crate::chat::normalize_thread_times(&mut self.threads);
-                    crate::chat::deduplicate_threads(&mut self.threads,None);
+                    if !changed {continue;}
                     if let Some(id)=selected {
                         if let Some(index)=self.threads.iter().position(|t|t.id==id) {self.selected_thread_index=index;}
                     }
                     // Backfilled messages are old: do not increment unread badges or play notifications.
+                    self.sidebar_revision = self.sidebar_revision.wrapping_add(1);
+                    if let Some(tx)=WORKER_TX.get(){let _=tx.send(WorkerCmd::UpdatePollThreads { known_threads:self.poll_thread_metadata() });}
                 }
                 GuiEvent::ThreadsUpdated(updates) => {
                     if self.is_logged_in && !updates.is_empty() {
@@ -706,16 +721,6 @@ impl ZaloGuiApp {
                             self.history_sync_started=true;
                             if let Some(tx)=WORKER_TX.get() {let command=if std::mem::take(&mut self.phone_sync_on_start){WorkerCmd::SyncPhone}else{WorkerCmd::SyncHistory};let _=tx.send(command);}
                         }
-                        let prev_selected_name = self
-                            .threads
-                            .get(self.selected_thread_index)
-                            .map(|t| (t.name.clone(), t.is_group));
-                        let live_ids: HashSet<String> = updates
-                            .iter()
-                            .filter(|u| !u.id.is_empty() && u.id != "0")
-                            .map(|u| u.id.clone())
-                            .collect();
-
                         let active_tid = self
                             .threads
                             .get(self.selected_thread_index)
@@ -723,12 +728,13 @@ impl ZaloGuiApp {
                             .unwrap_or_default();
                         let is_focused = ctx.input(|i| i.focused);
                         let mut new_incoming_alert = false;
+                        let mut changed = false;
 
                         for nt in updates {
                             if let Some(existing) = self.threads.iter_mut().find(|t| t.id == nt.id)
                             {
                                 let old_len = existing.messages.len();
-                                crate::chat::merge_thread_into(existing, nt, true);
+                                changed |= crate::chat::merge_thread_into(existing, nt, true);
                                 let added = existing.messages.len().saturating_sub(old_len);
                                 if added > 0 {
                                     let inc_cnt = existing
@@ -746,13 +752,9 @@ impl ZaloGuiApp {
                                         new_incoming_alert |= !self.settings.muted_threads.contains(&existing.id);
                                     }
                                 }
-                            } else if let Some(existing) = self.threads.iter_mut().find(|t| {
-                                !live_ids.contains(&t.id)
-                                    && crate::chat::threads_represent_same_contact(t, &nt)
-                            }) {
-                                crate::chat::merge_thread_into(existing, nt, true);
                             } else if !nt.id.is_empty() && nt.id != "0" {
                                 self.threads.push(nt);
+                                changed = true;
                             }
                         }
 
@@ -772,13 +774,12 @@ impl ZaloGuiApp {
                                 );
                             }
                         }
-                        crate::chat::deduplicate_threads(&mut self.threads, Some(&live_ids));
-
-                        if let Some((sel_name, sel_grp)) = prev_selected_name {
+                        if !changed { continue; }
+                        if !active_tid.is_empty() {
                             if let Some(idx) = self
                                 .threads
                                 .iter()
-                                .position(|t| t.is_group == sel_grp && t.name == sel_name)
+                                .position(|t| t.id == active_tid)
                             {
                                 self.selected_thread_index = idx;
                             }
@@ -805,6 +806,8 @@ impl ZaloGuiApp {
                     self.user_name.clear();
                     self.user_uin.clear();
                     self.threads.clear();
+                    self.sidebar_cache=None;
+                    self.sidebar_revision=self.sidebar_revision.wrapping_add(1);
                     self.selected_thread_index = 0;
                     self.qr_texture = None;
                     self.qr_status = "Đang xin mã QR mới…".into();
@@ -995,7 +998,7 @@ impl ZaloGuiApp {
                     ctx.data_mut(|data| {let mut failed=data.get_temp::<HashSet<String>>(Id::new("failed_images")).unwrap_or_default();failed.insert(key);data.insert_temp(Id::new("failed_images"),failed);});
                 }
                 GuiEvent::AliasesUpdated {owner,result} => {
-                    if owner==self.user_uin {self.alias_sync_pending=false;if let Ok(aliases)=result {self.nicknames=aliases;}}
+                    if owner==self.user_uin {self.alias_sync_pending=false;if let Ok(aliases)=result {if self.nicknames!=aliases {self.nicknames=aliases;self.sidebar_revision=self.sidebar_revision.wrapping_add(1);}}}
                 }
                 GuiEvent::PickedAttachments {thread_id,files} => self.stage_files(&thread_id, files),
                 GuiEvent::ClipboardReady {thread_id,result} => {
@@ -1302,22 +1305,9 @@ impl eframe::App for ZaloGuiApp {
         video_state.loading=self.video_loading_url.clone();
         ctx.data_mut(|data|data.insert_temp(crate::inline_video::state_id(),video_state));
 
-        // Non-overlapping long-poll trigger; wakes only every 1.2s to keep idle CPU ~0%
-        if self.is_logged_in && self.last_poll.elapsed() >= Duration::from_millis(1200) {
-            self.last_poll = std::time::Instant::now();
-            if let Some(tx) = WORKER_TX.get() {
-                let known: Vec<(String, String, bool)> = self
-                    .threads
-                    .iter()
-                    .map(|t| (t.id.clone(), t.name.clone(), t.is_group))
-                    .collect();
-                let _ = tx.send(WorkerCmd::PollMessages {
-                    known_threads: known,
-                });
-            }
-        }
-
-        ctx.request_repaint_after(Duration::from_millis(1200));
+        // Polling lives in the worker. This slow wake only handles maintenance
+        // (activation request, alias refresh) when there are no input events.
+        ctx.request_repaint_after(Duration::from_secs(3));
 
         let pal = self.palette();
 
@@ -1400,6 +1390,9 @@ impl eframe::App for ZaloGuiApp {
         }
 
         // Main Workspace
+        if self.persistence_dirty.get() {
+            self.sidebar_revision = self.sidebar_revision.wrapping_add(1);
+        }
         if !self.is_logged_in {
             egui::CentralPanel::default()
                 .frame(egui::Frame::none().fill(pal.bg_chat_canvas))
@@ -1411,6 +1404,8 @@ impl eframe::App for ZaloGuiApp {
         }
 
         if self.persistence_dirty.replace(false) {
+            self.sidebar_revision = self.sidebar_revision.wrapping_add(1);
+            if let Some(tx)=WORKER_TX.get(){let _=tx.send(WorkerCmd::UpdatePollThreads { known_threads:self.poll_thread_metadata() });}
             if let Some(slot)=PERSIST_SLOT.get() { slot.replace(self.threads.clone()); }
         }
 

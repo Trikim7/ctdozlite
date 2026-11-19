@@ -657,6 +657,9 @@ impl ZaloGuiApp {
                         });
                 }
 
+                let cache_hit = self.sidebar_cache.as_ref().is_some_and(|(revision,q,filter,_)|
+                    *revision==self.sidebar_revision && q==&query && *filter==self.thread_filter);
+                let filtered_indices: Vec<usize> = if cache_hit {self.sidebar_cache.as_ref().unwrap().3.clone()} else {
                 let mut filtered_indices: Vec<usize> = self
                     .threads
                     .iter()
@@ -695,6 +698,9 @@ impl ZaloGuiApp {
                         .unwrap_or(0);
                     ts_b.cmp(&ts_a)
                 });
+                self.sidebar_cache=Some((self.sidebar_revision,query.clone(),self.thread_filter,filtered_indices.clone()));
+                filtered_indices
+                };
 
                 // Also search message contents across all conversations when `query` is non-empty!
                 let msg_hits: Vec<(usize, String, String, String, bool)> = if query.len() >= 2 {
@@ -743,6 +749,7 @@ impl ZaloGuiApp {
                                 Sense::click(),
                             );
                             let row_rect = row_rect.translate(Vec2::new(4.0, 0.0));
+                            if !row_rect.intersects(ui.clip_rect()) { continue; }
 
                             let bg = if is_selected {
                                 pal.bg_selected
@@ -1464,6 +1471,14 @@ impl ZaloGuiApp {
                 if let Some((thread_id, thread_name, thread_avatar, is_group, _msg_count)) =
                     thread_meta
                 {
+                    if self.chat_render_window.0 != thread_id {
+                        self.chat_render_window=(thread_id.clone(),memory::CHAT_PAGE_SIZE);
+                        self.chat_scroll_anchor=None;
+                    }
+                    let mut reveal_older=false;
+                    let render_limit=self.chat_render_window.1;
+                    let restore_anchor=self.chat_scroll_anchor.take();
+                    let mut next_anchor=None;
                     let is_cloud_thread = thread_name.contains("Cloud của tôi");
                     if !is_group
                         && !is_cloud_thread
@@ -2287,7 +2302,7 @@ impl ZaloGuiApp {
                         .id_salt(Id::new(("chat_scroll", &thread_id)))
                         .max_height(msg_area_height)
                         .auto_shrink([false, false])
-                        .stick_to_bottom(true)
+                        .stick_to_bottom(restore_anchor.is_none())
                         .show(ui, |ui| {
                             egui::Frame::none()
                                 .inner_margin(Margin::symmetric(18.0, 12.0))
@@ -2326,11 +2341,15 @@ impl ZaloGuiApp {
                                                         .add(hist_btn)
                                                         .on_hover_cursor(CursorIcon::PointingHand)
                                                         .on_hover_text(
-                                                            "Đồng bộ thêm lịch sử tin nhắn cũ từ máy chủ Zalo",
+                                                            "Hiển thị thêm tin đã lưu, sau đó tải thêm từ Zalo",
                                                         )
                                                         .clicked()
                                                     {
-                                                        if let Some(tx) = WORKER_TX.get() {
+                                                        if thread.messages.len()>render_limit {
+                                                            reveal_older=true;
+                                                            next_anchor=thread.messages.get(thread.messages.len()-render_limit)
+                                                                .map(|m|m.id.clone()).filter(|id|!id.is_empty());
+                                                        } else if let Some(tx) = WORKER_TX.get() {
                                                             let _ = tx.send(
                                                                 WorkerCmd::LoadGroupHistory {
                                                                     group_id: thread_id.clone(),
@@ -2338,7 +2357,7 @@ impl ZaloGuiApp {
                                                                 },
                                                             );
                                                         }
-                                                        load_older_clicked = true;
+                                                        load_older_clicked = !reveal_older;
                                                     }
                                                     ui.add_space(6.0);
                                                 });
@@ -2370,10 +2389,11 @@ impl ZaloGuiApp {
                                                 })
                                                 .map(|(i, _)| i)
                                                 .collect());
-                                            let visible_count = visible_indices.as_ref().map_or(thread.messages.len(), Vec::len);
+                                            let normal_range=memory::newest_window(thread.messages.len(),render_limit);
+                                            let visible_count = visible_indices.as_ref().map_or(normal_range.len(), Vec::len);
                                             let index_at = |pos| match &visible_indices {
                                                 Some(indices) => indices.get(pos).copied(),
-                                                None => (pos < visible_count).then_some(pos),
+                                                None => (pos < visible_count).then_some(normal_range.start+pos),
                                             };
                                             if visible_count == 0 && !in_chat_q.is_empty() {
                                                 ui.vertical_centered(|ui| {
@@ -2436,6 +2456,7 @@ impl ZaloGuiApp {
                                                 } else {
                                                     group_avatars.get(msg.sender.as_str()).copied().flatten()
                                                 };
+                                                let row_top=ui.next_widget_position().y;
                                                 if let Some(action) = render_chat_bubble(
                                                     ui,
                                                     msg,
@@ -2453,6 +2474,12 @@ impl ZaloGuiApp {
                                                 ) {
                                                     pending_action = Some((idx, action));
                                                 }
+                                                if restore_anchor.as_deref()==Some(msg.id.as_str()) {
+                                                    ui.scroll_to_rect(Rect::from_min_max(
+                                                        Pos2::new(ui.min_rect().left(),row_top),
+                                                        Pos2::new(ui.min_rect().right(),ui.next_widget_position().y),
+                                                    ),Some(Align::TOP));
+                                                }
                                                 ui.add_space(if next_same_sender {
                                                     2.5
                                                 } else {
@@ -2463,6 +2490,11 @@ impl ZaloGuiApp {
                                     }
                                 });
                         });
+                    if reveal_older || load_older_clicked {
+                        self.chat_render_window.1=self.chat_render_window.1.saturating_add(memory::CHAT_PAGE_SIZE);
+                        self.chat_scroll_anchor=next_anchor;
+                        ctx.request_repaint();
+                    }
                     if load_older_clicked {
                         self.show_toast("Đang tải thêm tin nhắn cũ từ máy chủ Zalo…");
                     }

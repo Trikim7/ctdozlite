@@ -5,6 +5,68 @@ use std::{
     sync::{Condvar, Mutex},
 };
 
+/// Compare complete small poll batches, including message metadata.
+/// Large batches bypass the cache to avoid keeping a second history snapshot.
+#[derive(Default)]
+pub(super) struct PollBatch {
+    previous: Vec<Thread>,
+}
+impl PollBatch {
+    pub(super) fn changed(&mut self, batch:&[Thread])->bool {
+        if batch.is_empty() {return false;}
+        // Bound both item count and aggregate text/metadata by using serialized size
+        // only for the small candidate batches; bypass oversized batches.
+        let count=batch.iter().map(|t|t.messages.len()).sum::<usize>();
+        if batch.len()>64 || count>256 {
+            self.previous.clear();
+            return true;
+        }
+        if self.previous==batch {return false;}
+        struct Budget(usize);
+        impl std::io::Write for Budget {
+            fn write(&mut self, bytes:&[u8])->std::io::Result<usize> {
+                if bytes.len()>self.0 {return Err(std::io::Error::other("poll cache limit"));}
+                self.0-=bytes.len();Ok(bytes.len())
+            }
+            fn flush(&mut self)->std::io::Result<()> {Ok(())}
+        }
+        let bounded=serde_json::to_writer(Budget(1024*1024),batch).is_ok();
+        if bounded {self.previous=batch.to_vec();} else {self.previous.clear();}
+        true
+    }
+}
+
+pub(super) const CHAT_PAGE_SIZE:usize=150;
+pub(super) fn newest_window(total:usize,limit:usize)->std::ops::Range<usize>{
+    total.saturating_sub(limit)..total
+}
+
+#[cfg(test)]
+mod upstream_perf_tests {
+    use super::*;
+    #[test]
+    fn normal_history_window_pages_without_touching_older_data() {
+        assert_eq!(newest_window(2000,CHAT_PAGE_SIZE),1850..2000);
+        assert_eq!(newest_window(2000,2*CHAT_PAGE_SIZE),1700..2000);
+        assert_eq!(newest_window(17,CHAT_PAGE_SIZE),0..17);
+    }
+    #[test]
+    fn poll_cache_only_suppresses_exact_replays_not_metadata_updates() {
+        let mut cache=PollBatch::default();
+        let mut batch=vec![Thread {id:"1".into(),name:"Fixture".into(),preview:"hello".into(),
+            time:String::new(),avatar:None,is_group:false,
+            messages:vec![ChatMessage {id:"m".into(),text:"hello".into(),..Default::default()}]}];
+        assert!(cache.changed(&batch));
+        assert!(!cache.changed(&batch));
+        batch[0].messages[0].reactions.push("❤️".into());
+        assert!(cache.changed(&batch));
+        assert!(!cache.changed(&batch));
+        batch[0].messages[0].text="a".repeat(2*1024*1024);
+        assert!(cache.changed(&batch));
+        assert!(cache.previous.is_empty());
+    }
+}
+
 const TEXTURE_BUDGET: usize = 64 * 1024 * 1024;
 const TEXTURE_COUNT: usize = 256;
 

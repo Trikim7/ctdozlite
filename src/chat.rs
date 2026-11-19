@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use crate::session::{obj, Session};
 
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChatMessage {
     pub id: String,
     pub sender: String,
@@ -73,7 +73,7 @@ impl ChatMessage {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Thread {
     pub id: String,
     pub name: String,
@@ -129,28 +129,50 @@ pub fn avatar_url_time(avatar: Option<&str>) -> i64 {
     0
 }
 
-/// Return `true` if two `Thread` entries represent the same underlying contact or group,
-/// even if Zalo issued a new session-scoped `userId` after a QR re-login.
+/// Display names and avatars are not identity proofs.
 pub fn threads_represent_same_contact(a: &Thread, b: &Thread) -> bool {
-    if !a.id.is_empty() && a.id == b.id {
-        return true;
+    !a.id.is_empty() && a.id != "0" && a.id == b.id
+}
+
+/// Exact IDs are indexed once per batch. Only reconcile a unique, pending outgoing
+/// text echo with a confirmed server message; never collapse two confirmed IDs.
+pub(crate) struct MessageIndex {
+    ids: std::collections::HashMap<String, usize>,
+    pending: std::collections::HashMap<String, Vec<usize>>,
+}
+fn pending_id(id: &str) -> bool { id.starts_with("out_") || id.starts_with("local_") }
+impl MessageIndex {
+    pub(crate) fn new(messages: &[ChatMessage]) -> Self {
+        let mut index = Self { ids: Default::default(), pending: Default::default() };
+        for (i, msg) in messages.iter().enumerate() { index.insert(i, msg); }
+        index
     }
-    if a.is_group != b.is_group {
-        return false;
+    pub(crate) fn insert(&mut self, i: usize, msg: &ChatMessage) {
+        if !msg.id.is_empty() && msg.id != "0" {
+            self.ids.insert(msg.id.clone(), i);
+        }
+        if pending_id(&msg.id) && msg.is_outgoing && msg.link_url.is_none() && msg.sticker_id.is_none() {
+            self.pending.entry(msg.text.clone()).or_default().push(i);
+        }
     }
-    if let (Some(ka), Some(kb)) = (
-        avatar_file_key(a.avatar.as_deref()),
-        avatar_file_key(b.avatar.as_deref()),
-    ) {
-        return ka == kb;
+    pub(crate) fn find(&self, messages: &[ChatMessage], msg: &ChatMessage) -> Option<usize> {
+        if !msg.id.is_empty() && msg.id != "0" {
+            if let Some(&i) = self.ids.get(&msg.id) {
+                if messages.get(i).is_some_and(|m|m.id == msg.id) { return Some(i); }
+            }
+        }
+        if !msg.is_outgoing || msg.id.is_empty() || msg.id == "0" || pending_id(&msg.id)
+            || msg.ts <= 0 || msg.link_url.is_some() || msg.sticker_id.is_some() || msg.text.is_empty() {
+            return None;
+        }
+        let mut candidates = self.pending.get(&msg.text)?.iter().copied().filter(|&i| {
+            let m = &messages[i];
+            pending_id(&m.id) && m.is_outgoing && m.ts > 0
+                && m.ts.abs_diff(msg.ts) < 5000 && m.text == msg.text
+        });
+        let first = candidates.next()?;
+        candidates.next().is_none().then_some(first)
     }
-    if !is_generic_thread_name(&a.name)
-        && !is_generic_thread_name(&b.name)
-        && a.name.trim() == b.name.trim()
-    {
-        return true;
-    }
-    false
 }
 
 /// Merge `incoming` thread into `target`. When `incoming_id_is_authoritative` is `true`,
@@ -159,7 +181,8 @@ pub fn merge_thread_into(
     target: &mut Thread,
     incoming: Thread,
     incoming_id_is_authoritative: bool,
-) {
+) -> bool {
+    let prior = (target.id.clone(),target.name.clone(),target.avatar.clone(),target.is_group,target.preview.clone(),target.time.clone());
     if incoming_id_is_authoritative && !incoming.id.is_empty() && incoming.id != "0" {
         target.id = incoming.id;
     }
@@ -177,20 +200,18 @@ pub fn merge_thread_into(
     }
     target.is_group = target.is_group || incoming.is_group;
 
+    let mut changed = false;
+    let mut index = MessageIndex::new(if incoming.messages.is_empty() {&[]}else{&target.messages});
     for msg in incoming.messages {
         if msg.text == "sendBubbleMessage" {
             continue;
         }
-        if let Some(existing_msg) = target.messages.iter_mut().find(|m| {
-            (!m.id.is_empty() && !msg.id.is_empty() && m.id == msg.id)
-                || (m.text == msg.text
-                    && m.is_outgoing == msg.is_outgoing
-                    && (m.time == msg.time
-                        || (m.ts != 0 && msg.ts != 0 && (m.ts - msg.ts).abs() < 5000)))
-        }) {
-            if existing_msg.id.starts_with("out_")
+        if let Some(i) = index.find(&target.messages, &msg) {
+            let existing_msg = &mut target.messages[i];
+            let before = existing_msg.clone();
+            if pending_id(&existing_msg.id)
                 && !msg.id.is_empty()
-                && !msg.id.starts_with("out_")
+                && !pending_id(&msg.id)
             {
                 existing_msg.id = msg.id;
             }
@@ -233,13 +254,19 @@ pub fn merge_thread_into(
             }
             existing_msg.is_pinned = existing_msg.is_pinned || msg.is_pinned;
             existing_msg.is_starred = existing_msg.is_starred || msg.is_starred;
+            if before.id != existing_msg.id { index.insert(i, existing_msg); }
+            changed |= before != *existing_msg;
         } else {
+            index.insert(target.messages.len(), &msg);
             target.messages.push(msg);
+            changed = true;
         }
     }
 
+    let before_len = target.messages.len();
     target.messages.retain(|m| m.text != "sendBubbleMessage");
-    target.messages.sort_by_key(|m| m.ts);
+    changed |= before_len != target.messages.len();
+    if changed { target.messages.sort_by_key(|m| m.ts); }
 
     if let Some(newest) = target.messages.last() {
         if !newest.text.is_empty() {
@@ -254,15 +281,16 @@ pub fn merge_thread_into(
     } else if (target.time.is_empty() || incoming_id_is_authoritative) && !incoming.time.is_empty() {
         target.time = incoming.time;
     }
+    changed || prior != (target.id.clone(),target.name.clone(),target.avatar.clone(),target.is_group,target.preview.clone(),target.time.clone())
 }
 
-/// Deduplicate `threads` in-place, merging entries that represent the same contact/group
-/// (by `id`, avatar hash, or non-generic display name) and preserving the authoritative/newer `id`.
+/// Deduplicate only exact thread IDs; never migrate history based on name or avatar.
 pub fn deduplicate_threads(
     threads: &mut Vec<Thread>,
     authoritative_ids: Option<&std::collections::HashSet<String>>,
 ) {
     let mut merged: Vec<Thread> = Vec::with_capacity(threads.len());
+    let mut ids = std::collections::HashMap::<String, usize>::new();
     for mut t in threads.drain(..) {
         if t.id.is_empty() || t.id == "0" {
             continue;
@@ -274,31 +302,13 @@ pub fn deduplicate_threads(
                 t.time = newest.time.clone();
             }
         }
-        if let Some(existing) = merged.iter_mut().find(|e| {
-            if e.id == t.id {
-                return true;
-            }
-            if let Some(auth) = authoritative_ids {
-                if auth.contains(&e.id) && auth.contains(&t.id) {
-                    return false;
-                }
-            }
-            threads_represent_same_contact(e, &t)
-        }) {
-            let incoming_auth = if let Some(auth) = authoritative_ids {
-                auth.contains(&t.id) && !auth.contains(&existing.id)
-            } else {
-                // In cache order, later entries or entries with newer avatar URL timestamps come from newer sessions
-                let t_time = avatar_url_time(t.avatar.as_deref());
-                let e_time = avatar_url_time(existing.avatar.as_deref());
-                if t_time != e_time {
-                    t_time > e_time
-                } else {
-                    true
-                }
-            };
+        if let Some(&i) = ids.get(&t.id) {
+            let existing = &mut merged[i];
+            let incoming_auth = authoritative_ids.is_some_and(|auth| auth.contains(&t.id))
+                || avatar_url_time(t.avatar.as_deref()) >= avatar_url_time(existing.avatar.as_deref());
             merge_thread_into(existing, t, incoming_auth);
         } else {
+            ids.insert(t.id.clone(), merged.len());
             merged.push(t);
         }
     }
@@ -3321,8 +3331,8 @@ pub(crate) fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     let msg_id = undo_target_id
         .or_else(|| {
             it.get("msgId")
-                .or_else(|| it.get("cliMsgId"))
                 .or_else(|| it.get("globalMsgId"))
+                .or_else(|| it.get("cliMsgId"))
                 .or_else(|| it.get("lastMsgId"))
                 .or_else(|| it.get("id"))
                 .and_then(|v| match v {
@@ -3579,6 +3589,7 @@ pub fn merge_previews(threads: &mut Vec<Thread>, resp: &Value) {
         }
     }
 
+    let mut message_indexes = std::collections::HashMap::<String, MessageIndex>::new();
     for (entry, is_grp_bucket) in entries {
         let mut raw_msgs: Vec<(&Value, bool)> = Vec::new();
         if let Some(arr) = entry.get("messages").and_then(Value::as_array) {
@@ -3623,15 +3634,12 @@ pub fn merge_previews(threads: &mut Vec<Thread>, resp: &Value) {
                 if thread_is_group {
                     t.is_group = true;
                 }
-                if let Some(existing) = t.messages.iter_mut().find(|existing| {
-                    (!existing.id.is_empty() && !parsed.id.is_empty() && existing.id == parsed.id)
-                        || (existing.text == parsed.text
-                            && existing.is_outgoing == parsed.is_outgoing
-                            && (existing.time == parsed.time
-                                || (existing.ts != 0 && parsed.ts != 0 && (existing.ts - parsed.ts).abs() < 5000)))
-                }) {
-                    if existing.id.starts_with("out_") && !parsed.id.is_empty() && !parsed.id.starts_with("out_") {
+                let index = message_indexes.entry(tid.clone()).or_insert_with(||MessageIndex::new(&t.messages));
+                if let Some(i) = index.find(&t.messages, &parsed) {
+                    let existing = &mut t.messages[i];
+                    if pending_id(&existing.id) && !parsed.id.is_empty() && !pending_id(&parsed.id) {
                         existing.id = parsed.id;
+                        index.insert(i,existing);
                     }
                     if parsed.ts > 0 && existing.ts != parsed.ts {
                         existing.ts = parsed.ts;
@@ -3669,6 +3677,7 @@ pub fn merge_previews(threads: &mut Vec<Thread>, resp: &Value) {
                     existing.is_pinned = existing.is_pinned || parsed.is_pinned;
                     existing.is_starred = existing.is_starred || parsed.is_starred;
                 } else {
+                    index.insert(t.messages.len(), &parsed);
                     t.messages.push(parsed);
                 }
             } else {
@@ -3735,6 +3744,7 @@ pub fn merge_group_history(thread: &mut Thread, resp: &Value) {
         .trim_start_matches('G')
         .to_string();
 
+    let mut index = MessageIndex::new(&thread.messages);
     for it in raw_msgs {
         if !clean_thread_id.is_empty() {
             if let Some(id_to) = pick_str(it, &["idTo", "toId", "grid", "groupId"]) {
@@ -3748,10 +3758,12 @@ pub fn merge_group_history(thread: &mut Thread, resp: &Value) {
             }
         }
         if let Some(m) = parse_chat_message(it) {
-            if let Some(existing) = thread.messages.iter_mut().find(|existing| {
-                (!existing.id.is_empty() && !m.id.is_empty() && existing.id == m.id)
-                    || (existing.text == m.text && existing.ts != 0 && existing.ts == m.ts)
-            }) {
+            if let Some(i) = index.find(&thread.messages, &m) {
+                let existing = &mut thread.messages[i];
+                if pending_id(&existing.id) && !pending_id(&m.id) && !m.id.is_empty() {
+                    existing.id = m.id.clone();
+                    index.insert(i, existing);
+                }
                 if existing.link_url.is_none() && m.link_url.is_some() {
                     existing.link_url = m.link_url;
                     existing.link_title = m.link_title;
@@ -3763,6 +3775,7 @@ pub fn merge_group_history(thread: &mut Thread, resp: &Value) {
                     }
                 }
             } else {
+                index.insert(thread.messages.len(), &m);
                 thread.messages.push(m);
             }
         }
@@ -4500,7 +4513,7 @@ mod tests {
     }
 
     #[test]
-    fn test_deduplicate_threads_migrates_session_scoped_ids() {
+    fn different_ids_with_same_name_and_avatar_keep_separate_history() {
         let old_dtc = Thread {
             id: "1000000000000000005".into(),
             name: "Đtc".into(),
@@ -4529,10 +4542,40 @@ mod tests {
         };
         let mut threads = vec![old_dtc, new_dtc];
         deduplicate_threads(&mut threads, None);
-        assert_eq!(threads.len(), 1);
-        assert_eq!(threads[0].id, "1000000000000000006");
+        assert_eq!(threads.len(), 2);
+        assert_eq!(threads[0].id, "1000000000000000005");
         assert_eq!(threads[0].messages.len(), 1);
         assert_eq!(threads[0].preview, "Hi");
+        assert!(threads[1].messages.is_empty());
+    }
+
+    #[test]
+    fn indexed_merge_keeps_repeated_messages_and_ignores_exact_replays() {
+        let mut thread=sample_thread("group");
+        let message=|id:&str, ts:i64| ChatMessage {id:id.into(),text:"ok".into(),ts,time:"09:00".into(),sender:"A".into(),..Default::default()};
+        thread.messages.push(message("server-1",10000));
+        let mut batch=sample_thread("group");
+        batch.messages=vec![message("server-1",10000),message("server-2",10001)];
+        assert!(merge_thread_into(&mut thread,batch.clone(),true));
+        assert_eq!(thread.messages.len(),2);
+        assert!(!merge_thread_into(&mut thread,batch,true));
+        assert_eq!(thread.messages.len(),2);
+    }
+
+    #[test]
+    fn only_unique_pending_text_echo_is_reconciled() {
+        let mut thread=sample_thread("direct");
+        let message=|id:&str| ChatMessage {id:id.into(),text:"chào".into(),is_outgoing:true,ts:10000,time:"09:00".into(),..Default::default()};
+        thread.messages.push(message("out_1"));
+        let mut batch=sample_thread("direct");batch.messages.push(message("server-1"));
+        assert!(merge_thread_into(&mut thread,batch.clone(),true));
+        assert_eq!(thread.messages.len(),1);
+        assert_eq!(thread.messages[0].id,"server-1");
+        thread.messages.extend([message("out_2"),message("out_3")]);
+        batch.messages=vec![message("server-2")];
+        merge_thread_into(&mut thread,batch,true);
+        // Ambiguous local drafts may remain visible, but neither is silently lost.
+        assert_eq!(thread.messages.len(),4);
     }
 
     #[test]

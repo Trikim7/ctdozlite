@@ -276,13 +276,30 @@ mod vault_cycle_tests {
                     assert!(crate::chat::load_threads_cache().is_empty());
                     save_history("history-b");
                 }
+                "perf-a" => {
+                    let s=fixture("fixture-a");
+                    s.save_to_file("session.json").unwrap();
+                    bind_restored("fixture-a").unwrap();
+                    let messages=(0..2000).map(|i|crate::chat::ChatMessage {
+                        id:format!("fixture-message-{i}"),
+                        sender:format!("Thành viên {}",i%12),
+                        text:format!("Tin nhắn kiểm thử {i}: Nội dung giả dùng để đo hiệu suất hiển thị trong một hội thoại dài."),
+                        time:"09:00".into(), ts:1700000000000+i*60000,
+                        is_outgoing:i%3==0, ..Default::default()
+                    }).collect();
+                    crate::chat::save_threads_cache(&[crate::chat::Thread{
+                        id:"fixture-history".into(),name:"Nhóm kiểm thử 2.000 tin".into(),
+                        preview:"Lịch sử giả".into(),time:"09:00".into(),avatar:None,is_group:true,messages
+                    }]);
+                    assert_eq!(crate::chat::load_threads_cache()[0].messages.len(),2000);
+                }
                 "cleanup" => {
                     let base = root().unwrap();
                     for directory in [
                         &base,
                         &base.join("accounts").join(hash("fixture-b").unwrap()),
                     ] {
-                        for name in ["session.json", "threads_cache.json"] {
+                        for name in ["session.json", "threads_cache.json", "zalo_history.db", "nicknames.cache"] {
                             crate::secure_session::delete_test_data_key(&directory.join(name));
                         }
                     }

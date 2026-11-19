@@ -17,6 +17,9 @@ pub enum WorkerCmd {
     PollMessages {
         known_threads: Vec<(String, String, bool)>,
     },
+    UpdatePollThreads {
+        known_threads: Vec<(String, String, bool)>,
+    },
     LoadGroupHistory {
         group_id: String,
         is_group: bool,
@@ -344,8 +347,22 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                 let mut phone_task:Option<tokio::task::JoinHandle<()>>=None;
                 let mut phone_cancel:Option<tokio::sync::watch::Sender<bool>>=None;
 
-                while let Some(cmd) = cmd_rx.recv().await {
+                let mut known_threads = None::<Vec<(String,String,bool)>>;
+                let mut poll_timer=tokio::time::interval(Duration::from_millis(1200));
+                poll_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let last_poll_batch=std::sync::Arc::new(std::sync::Mutex::new(memory::PollBatch::default()));
+                loop {
+                    let cmd = tokio::select! {
+                        command=cmd_rx.recv() => match command {Some(cmd)=>cmd,None=>break},
+                        _=poll_timer.tick()=>match known_threads.as_ref() {
+                            Some(threads)=>WorkerCmd::PollMessages{known_threads:threads.clone()},
+                            None=>continue,
+                        }
+                    };
                     match cmd {
+                        WorkerCmd::UpdatePollThreads { known_threads: updated } => {
+                            known_threads=Some(updated);
+                        }
                         WorkerCmd::RefreshAliases => {
                             let s=session.lock().await.clone();let tx=gui_tx.clone();let ctx=egui_ctx.clone();
                             tokio::spawn(async move {
@@ -576,6 +593,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                             let poll_clone = poll_state.clone();
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
+                            let previous=last_poll_batch.clone();
                             tokio::spawn(async move {
                                 let _guard=poll_guard;
                                 let s = session_clone.lock().await.clone();
@@ -650,9 +668,11 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                                 &mut temp_threads,
                                             )
                                             .await;
-                                            let _ = gui_tx_clone
-                                                .send(GuiEvent::ThreadsUpdated(temp_threads));
-                                            ctx_clone.request_repaint();
+                                            let changed=previous.lock().map(|mut batch|batch.changed(&temp_threads)).unwrap_or(true);
+                                            if changed {
+                                                let _ = gui_tx_clone.send(GuiEvent::ThreadsUpdated(temp_threads));
+                                                ctx_clone.request_repaint();
+                                            }
                                         }
                                     }
                                 }
