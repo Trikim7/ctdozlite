@@ -43,7 +43,8 @@ pub(super) fn render_sticker_widget(
     }
 
     if let Some(tex) = sticker_textures.get(&key) {
-        ui.image((tex.id(), Vec2::new(116.0, 116.0)));
+        let edge = ui.available_width().clamp(1.0, 116.0);
+        ui.image((tex.id(), Vec2::splat(edge)));
         true
     } else {
         false
@@ -183,7 +184,7 @@ pub(super) fn render_call_card_widget(
     };
 
     ui.set_width(card_width);
-    let text_col_w = (card_width - 52.0).max(110.0);
+    let text_col_w = (card_width - 52.0).max(1.0);
     ui.vertical(|ui| {
         ui.set_width(card_width);
         ui.horizontal(|ui| {
@@ -954,7 +955,8 @@ fn render_inline_video(ui:&mut egui::Ui,msg:&ChatMessage,max_width:f32,textures:
         key
     });
     let texture=if active {textures.get(&video_key)} else {None}.or_else(||thumb_key.as_ref().and_then(|key|textures.get(key)));
-    let size=Vec2::new(max_width.clamp(160.0,360.0),max_width.clamp(160.0,360.0)*9.0/16.0);
+    let width = max_width.clamp(1.0, 360.0);
+    let size=Vec2::new(width,width*9.0/16.0);
     let response=if let Some(texture)=texture {ui.add(egui::Image::new(texture).fit_to_exact_size(size).rounding(Rounding::same(8.0)).sense(Sense::click()))}
     else {let(rect,response)=ui.allocate_exact_size(size,Sense::click());ui.painter().rect_filled(rect,Rounding::same(8.0),Color32::from_rgb(25,28,34));ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,"Video",FontId::proportional(18.0),Color32::WHITE);response};
     let mut action=if response.clicked()&&!pending {Some(if active {BubbleAction::ToggleVideo} else {BubbleAction::PlayVideo{url:url.to_string()}})} else {None};
@@ -1043,11 +1045,11 @@ pub(super) fn render_message_body(
                 let [tw, th] = tex.size();
                 let tw_f = (tw.max(1)) as f32;
                 let th_f = (th.max(1)) as f32;
-                let max_w = max_text_width.clamp(160.0, 270.0);
+                let max_w = max_text_width.clamp(1.0, 270.0);
                 let max_h = 260.0_f32;
                 let scale = (max_w / tw_f).min(max_h / th_f).min(1.0);
-                let disp_w = (tw_f * scale).clamp(135.0, max_w);
-                let disp_h = (th_f * scale).clamp(95.0, max_h);
+                let disp_w = (tw_f * scale).clamp(1.0, max_w);
+                let disp_h = (th_f * scale).clamp(1.0, max_h);
                 let img = egui::Image::new(tex)
                     .fit_to_exact_size(Vec2::new(disp_w, disp_h))
                     .rounding(Rounding::same(12.0))
@@ -1370,8 +1372,9 @@ pub(super) fn render_chat_bubble(
     idx: usize,
 ) -> Option<BubbleAction> {
     let avail_w = ui.available_width();
-    let max_bubble_width = (avail_w * 0.72).clamp(140.0, 520.0);
-    let max_text_width = (max_bubble_width - 24.0).max(90.0);
+    let avatar_space = if msg.is_outgoing { 0.0 } else { 44.0 };
+    let max_bubble_width = (avail_w * 0.72).min(avail_w - avatar_space).clamp(25.0, 520.0);
+    let max_text_width = max_bubble_width - 24.0;
     let has_sticker = is_sticker_message(msg).is_some();
     let call_card_opt = extract_call_card_view(msg);
     let is_call_card = call_card_opt.is_some();
@@ -1415,7 +1418,7 @@ pub(super) fn render_chat_bubble(
     // Pre-measure exact content width for both outgoing and incoming bubbles so every bubble,
     // photo, and call card hugs its content tightly without horizontal overflow or inner/outer frame mismatch.
     let content_width = if has_sticker {
-        116.0_f32
+        116.0_f32.min(max_text_width)
     } else if is_call_card {
         max_text_width.min(256.0)
     } else if is_photo_card {
@@ -1429,12 +1432,12 @@ pub(super) fn render_chat_bubble(
             let [tw, th] = tex.size();
             let tw_f = (tw.max(1)) as f32;
             let th_f = (th.max(1)) as f32;
-            let max_w = max_text_width.clamp(160.0, 270.0);
+            let max_w = max_text_width.clamp(1.0, 270.0);
             let max_h = 260.0_f32;
             let scale = (max_w / tw_f).min(max_h / th_f).min(1.0);
-            (tw_f * scale).clamp(135.0, max_w).ceil()
+            (tw_f * scale).clamp(1.0, max_w).ceil()
         } else {
-            220.0_f32
+            220.0_f32.min(max_text_width)
         };
         if has_photo_caption {
             let cap_str = msg
@@ -1494,7 +1497,7 @@ pub(super) fn render_chat_bubble(
                 .max(measure(desc, 12.3))
                 .max(measure(&dom, 12.6))
                 + 8.0;
-            w.clamp(135.0, max_text_width.min(340.0)).ceil()
+            w.clamp(1.0, max_text_width.min(340.0)).ceil()
         }
     } else {
         let display_str = if msg.text.trim() == "[Tin nhắn đã thu hồi]" {
@@ -1570,9 +1573,8 @@ pub(super) fn render_chat_bubble(
             .max(sender_w)
             .max(marks_w)
             .max(ts_min_w)
-            .min(max_text_width)
             .ceil()
-            + 4.0
+            .min(max_text_width)
     };
 
     let h_margin = if has_sticker || is_frameless_photo {
@@ -1872,6 +1874,16 @@ pub(super) fn bubble_context_menu(
 
     resp.context_menu(|ui| {
         ui.set_min_width(210.0);
+        if !msg.text.trim().is_empty() && ui.button("Sao chép nội dung").clicked() {
+            ui.ctx().copy_text(msg.text.clone());
+            ui.close_menu();
+        }
+        if let Some(url) = msg.link_url.as_ref().filter(|url| url.starts_with("https://")) {
+            if ui.button("Sao chép liên kết").clicked() {
+                ui.ctx().copy_text(url.clone());
+                ui.close_menu();
+            }
+        }
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
             for &(code, key, tooltip) in &REACTION_LIST {
@@ -2127,6 +2139,29 @@ pub(super) fn insert_clipboard_text(ctx:&egui::Context,thread_id:&str,text:&mut 
 
 #[cfg(test)] mod clipboard_text_tests {
     use super::*;
+    #[test]
+    fn file_bubbles_fit_a_narrow_chat_without_panicking() {
+        let ctx=egui::Context::default();
+        let mut loading=HashSet::new();
+        let textures=TextureCache::default();
+        let emoji=HashMap::new();
+        for is_outgoing in [false,true] {
+            let _=ctx.run(egui::RawInput {
+                screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(175.0,260.0))),
+                ..Default::default()
+            },|ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let file=ChatMessage {is_outgoing, text:"[Tập tin] Tài liệu dài".into(),
+                        link_title:Some("tên_tệp_không_có_dấu_cách_".repeat(12)),
+                        link_url:Some("https://files.zalo.me/file".into()),
+                        link_src:Some("Tập tin Zalo".into()), ..Default::default()};
+                    render_chat_bubble(ui,&file,false,false,false,true,"Nhóm",None,
+                        &ThemePalette::dark(),&textures,&mut loading,&emoji,0);
+                    assert!(ui.min_rect().right() <= ctx.screen_rect().right());
+                });
+            });
+        }
+    }
     #[cfg(target_os="linux")]
     #[test] fn semantic_paste_press_release_is_one_action_without_a_stuck_key() {
         let ctx=egui::Context::default();

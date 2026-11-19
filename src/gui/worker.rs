@@ -60,12 +60,9 @@ pub enum WorkerCmd {
         sticker_type: u32,
         is_group: bool,
     },
-    PickAndSendAttachment {
+    PickAttachments {
         to_id: String,
-        is_group: bool,
         images_only: bool,
-        caption: String,
-        preset_path: Option<std::path::PathBuf>,
     },
     LoadInlineVideo {url:String},
     FetchStickerImage {
@@ -376,13 +373,31 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                             let _=tx.send(GuiEvent::AttachmentUploading);ctx.request_repaint();
                             tokio::spawn(async move {
                                 let s=shared.lock().await.clone();
-                                for (index,file) in files.into_iter().enumerate() {
-                                    let result=crate::chat::send_attachment(&s,&to_id,is_group,&file.path,if index==0 {&caption}else{""}).await;
+                                let mut files = files.into_iter();
+                                let mut caption = caption;
+                                while let Some(file) = files.next() {
+                                    let result=crate::chat::send_attachment(&s,&to_id,is_group,&file.path,&caption).await;
                                     match result {
-                                        Ok((_,msg))=>{let _=tx.send(GuiEvent::AttachmentSent {thread_id:to_id.clone(),msg});}
-                                        Err(error)=>{let _=tx.send(GuiEvent::SendFailed {thread_id:to_id.clone(),text:if index==0 {caption.clone()}else{String::new()},error:format!("Không gửi được tệp clipboard: {error}")});}
+                                        Ok((_,msg))=>{
+                                            caption.clear();
+                                            let _=tx.send(GuiEvent::AttachmentSent {thread_id:to_id.clone(),msg});
+                                        }
+                                        Err(error)=>{
+                                            let name = file.path.file_name().and_then(|n| n.to_str()).unwrap_or("tệp");
+                                            let detail = match error.downcast_ref::<reqwest::Error>() {
+                                                Some(_) => "Kết nối bị gián đoạn. Kiểm tra hội thoại trước khi gửi lại.".into(),
+                                                None => error.to_string(),
+                                            };
+                                            let _=tx.send(GuiEvent::SendFailed {thread_id:to_id.clone(),text:String::new(),error:format!("{name}: {detail}")});
+                                            let _=tx.send(GuiEvent::AttachmentBatchFailed {
+                                                thread_id:to_id.clone(), caption,
+                                                files:std::iter::once(file).chain(files).collect(),
+                                            });
+                                            ctx.request_repaint();
+                                            break;
+                                        }
                                     }
-                                    drop(file);ctx.request_repaint();
+                                    ctx.request_repaint();
                                 }
                             });
                         }
@@ -1346,65 +1361,17 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                 }
                             });
                         }
-                        WorkerCmd::PickAndSendAttachment {
-                            to_id,
-                            is_group,
-                            images_only,
-                            caption,
-                            preset_path,
-                        } => {
-                            let session_clone = session.clone();
-                            let gui_tx_clone = gui_tx.clone();
-                            let ctx_clone = egui_ctx.clone();
-                            tokio::spawn(async move {
-                                let picked_path = if let Some(p) = preset_path {
-                                    Some(p)
-                                } else {
-                                    tokio::task::spawn_blocking(move || {
-                                        pick_native_file_dialog(images_only)
-                                    })
-                                    .await
-                                    .ok()
-                                    .flatten()
-                                };
-
-                                let Some(path) = picked_path else {
-                                    return;
-                                };
-                                let fname = path
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("tập tin")
-                                    .to_string();
-                                let _=gui_tx_clone.send(GuiEvent::AttachmentUploading);
-                                let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(format!(
-                                    "⏳ Đang tải lên và gửi '{fname}'…"
-                                )));
-                                ctx_clone.request_repaint();
-
-                                let s = session_clone.lock().await.clone();
-                                match crate::chat::send_attachment(
-                                    &s, &to_id, is_group, &path, &caption,
-                                )
-                                .await
-                                {
-                                    Ok((_resp, cm)) => {
-                                        let _ = gui_tx_clone.send(GuiEvent::AttachmentSent {
-                                            thread_id: to_id,
-                                            msg: cm,
-                                        });
-                                    }
-                                    Err(e) => {
-                                        let err_s = e.to_string();
-                                        crate::logger::log_error("gui::send_attachment", &err_s);
-                                        let _ = gui_tx_clone.send(GuiEvent::SendFailed {
-                                            thread_id: to_id,
-                                            text: caption,
-                                            error: format!("Lỗi gửi '{fname}': {err_s}"),
-                                        });
-                                    }
+                        WorkerCmd::PickAttachments { to_id, images_only } => {
+                            static PICKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                            let Some(guard) = memory::WorkGuard::claim(&PICKING) else { continue; };
+                            let tx = gui_tx.clone();
+                            let ctx = egui_ctx.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let _guard = guard;
+                                if let Some(path) = pick_native_file_dialog(images_only) {
+                                    let _ = tx.send(GuiEvent::PickedAttachments { thread_id: to_id, files: vec![path] });
+                                    ctx.request_repaint();
                                 }
-                                ctx_clone.request_repaint();
                             });
                         }
                         WorkerCmd::StartCall {

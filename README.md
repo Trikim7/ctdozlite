@@ -2,7 +2,11 @@
 
 Bản fork của [ctdoteam1110/ctdozlite](https://github.com/ctdoteam1110/ctdozlite), một Zalo client không chính thức viết bằng Rust với GUI và TUI. Giữ nguyên giấy phép MIT / Apache-2.0 và ghi nhận tác giả gốc.
 
-**Phiên bản mã nguồn của fork: 0.1.8.** Các bản EXE/DEB/DMG từ repository gốc không chứa những sửa đổi dưới đây. Không dùng chúng để đánh giá bản fork.
+**Phiên bản mã nguồn của fork: 0.1.9.** Các bản EXE/DEB/DMG từ repository gốc không chứa những sửa đổi dưới đây. Không dùng chúng để đánh giá bản fork.
+
+## Bản 0.1.9 — soạn tin, gửi tệp và thông báo
+
+Chọn hoặc kéo thả tệp để xem trước, rồi bấm Gửi. Nếu một tệp thất bại, ứng dụng giữ tệp đó và các tệp chưa gửi để thử lại thủ công. Menu ảnh đại diện có nút bật/tắt thông báo trên máy; bấm chuột phải vào hội thoại để tắt riêng. Menu tin nhắn có mục sao chép nội dung hoặc liên kết.
 
 ## Bản 0.1.8 — đăng nhập, đăng xuất và ổn định phiên
 

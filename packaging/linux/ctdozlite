@@ -3,6 +3,15 @@
 export XMODIFIERS="${XMODIFIERS:-@im=ibus}"
 export GTK_IM_MODULE="${GTK_IM_MODULE:-ibus}"
 export QT_IM_MODULE="${QT_IM_MODULE:-ibus}"
+# Bamboo's tested editing path is XIM. On a Wayland desktop use XWayland
+# for this app only, and leave other input methods on their native backend.
+if [ -n "${DISPLAY:-}" ] && [ -n "${WAYLAND_DISPLAY:-}${WAYLAND_SOCKET:-}" ] \
+    && [ "${CTDOZLITE_NATIVE_WAYLAND:-0}" != 1 ] \
+    && command -v ibus >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+    case "$(timeout 1s ibus engine 2>/dev/null)" in
+        Bamboo*) unset WAYLAND_DISPLAY WAYLAND_SOCKET ;;
+    esac
+fi
 APP_BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 export PATH="$APP_BIN_DIR:$PATH"
 exec "$APP_BIN_DIR/zalo-rust" "$@"

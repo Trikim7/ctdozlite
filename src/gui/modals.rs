@@ -81,6 +81,16 @@ impl ZaloGuiApp {
                         } else {
                             format!("{}  Chuyển giao diện Tối", lucide::MOON)
                         };
+                        if ui.button(if self.settings.enable_notifications {
+                            "Tắt thông báo trên máy"
+                        } else { "Bật thông báo trên máy" }).clicked() {
+                            self.settings.enable_notifications = !self.settings.enable_notifications;
+                            self.settings.save();
+                            if !self.settings.enable_notifications {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Reset));
+                            }
+                            close_menu = true;
+                        }
                         if ui
                             .add_sized(
                                 [200.0, 28.0],
@@ -1056,6 +1066,10 @@ impl ZaloGuiApp {
                                                                 let r_click = ui.radio(selected, label).clicked();
                                                                 if l_resp.on_hover_cursor(CursorIcon::PointingHand).clicked() || r_click {
                                                                     self.settings.enable_notifications = en_val;
+                                                                    self.settings.save();
+                                                                    if !en_val {
+                                                                        ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Reset));
+                                                                    }
                                                                 }
                                                             });
                                                         }

@@ -76,6 +76,8 @@ pub enum GuiEvent {
         sticker_type: u32,
     },
     AttachmentUploading,
+    AttachmentBatchFailed { thread_id: String, caption: String, files: Vec<crate::clipboard::Attachment> },
+    PickedAttachments { thread_id: String, files: Vec<std::path::PathBuf> },
     AttachmentSent {
         thread_id: String,
         msg: ChatMessage,
@@ -219,6 +221,7 @@ struct AppSettings {
     use_avatar_as_wallpaper: bool,
     // 4. Thông báo
     enable_notifications: bool,
+    muted_threads: HashSet<String>,
     play_notification_sound: bool,
     // 5. Tin nhắn
     quick_messages_enabled: bool,
@@ -267,6 +270,7 @@ impl Default for AppSettings {
             theme_mode: "dark".into(),
             use_avatar_as_wallpaper: false,
             enable_notifications: true,
+            muted_threads: HashSet::new(),
             play_notification_sound: false,
             quick_messages_enabled: true,
             hidden_chat_pin_enabled: true,
@@ -353,6 +357,7 @@ pub struct ZaloGuiApp {
     info_drawer_open: bool,
     profile_menu_open: bool,
     send_error: Option<String>,
+    failed_attachments: Option<(String, String, Vec<crate::clipboard::Attachment>)>,
     toast_notice: Option<(String, std::time::Instant)>,
     phone_modal_open: bool,
     phone_modal_input: String,
@@ -539,6 +544,7 @@ impl ZaloGuiApp {
             info_drawer_open: true,
             profile_menu_open: false,
             send_error: None,
+            failed_attachments: None,
             toast_notice: None,
             phone_modal_open: false,
             phone_modal_input: String::new(),
@@ -737,7 +743,7 @@ impl ZaloGuiApp {
                                             .unread_counts
                                             .entry(existing.id.clone())
                                             .or_insert(0) += inc_cnt;
-                                        new_incoming_alert = true;
+                                        new_incoming_alert |= !self.settings.muted_threads.contains(&existing.id);
                                     }
                                 }
                             } else if let Some(existing) = self.threads.iter_mut().find(|t| {
@@ -870,6 +876,9 @@ impl ZaloGuiApp {
                     self.status_msg = format!("Đã gửi nhãn dán lúc {}", crate::ui::clock());
                 }
                 GuiEvent::AttachmentUploading => {self.send_error=None;self.show_toast("Đang tải tệp lên Zalo…");}
+                GuiEvent::AttachmentBatchFailed {thread_id, caption, files} => {
+                    self.failed_attachments=Some((thread_id, caption, files));
+                }
                 GuiEvent::AttachmentSent { thread_id, msg } => {
                     if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
                         t.preview = msg.text.clone();
@@ -988,6 +997,7 @@ impl ZaloGuiApp {
                 GuiEvent::AliasesUpdated {owner,result} => {
                     if owner==self.user_uin {self.alias_sync_pending=false;if let Ok(aliases)=result {self.nicknames=aliases;}}
                 }
+                GuiEvent::PickedAttachments {thread_id,files} => self.stage_files(&thread_id, files),
                 GuiEvent::ClipboardReady {thread_id,result} => {
                     self.clipboard_loading=false;
                     if self.threads.get(self.selected_thread_index).is_some_and(|t|t.id==thread_id) {
@@ -1147,14 +1157,15 @@ impl ZaloGuiApp {
                     self.phone_lookup_error = Some(err);
                 }
                 GuiEvent::SendFailed {
-                    thread_id: _,
+                    thread_id,
                     text,
                     error,
                 } => {
-                    if self.input_message.is_empty() && !text.is_empty() {
+                    let current = self.threads.get(self.selected_thread_index).is_some_and(|t|t.id==thread_id);
+                    if current && self.input_message.is_empty() && !text.is_empty() {
                         self.input_message = text;
                     }
-                    self.send_error=Some(format!("Không gửi được: {error}"));
+                    if current { self.send_error=Some(format!("Không gửi được: {error}")); }
                     self.show_toast(format!("Không gửi được: {error}"));
                 }
                 GuiEvent::CallStateChanged(state) => {
@@ -1203,7 +1214,7 @@ impl ZaloGuiApp {
                         if is_video { "video" } else { "thoại" }
                     );
                     self.active_call = Some(ActiveCallOverlay {
-                        partner_id: caller_id,
+                        partner_id: caller_id.clone(),
                         partner_name: resolved_name,
                         is_video,
                         is_group,
@@ -1215,9 +1226,11 @@ impl ZaloGuiApp {
                         error_code: None,
                         error_reason: None,
                     });
-                    ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
-                        egui::UserAttentionType::Critical,
-                    ));
+                    if self.settings.enable_notifications && !self.settings.muted_threads.contains(&caller_id) {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                            egui::UserAttentionType::Critical,
+                        ));
+                    }
                 }
                 GuiEvent::CallRejected { code, reason } => {
                     self.status_msg = format!("⚠️ Từ chối cuộc gọi (mã {code}): {reason}");
@@ -1942,6 +1955,19 @@ impl ZaloGuiApp {
                     });
                 });
         });
+    }
+
+    fn stage_files(&mut self, thread_id: &str, files: Vec<std::path::PathBuf>) {
+        if files.is_empty() || !self.threads.get(self.selected_thread_index).is_some_and(|t|t.id==thread_id) {
+            return;
+        }
+        self.pending_clipboard_thread=Some(thread_id.to_owned());
+        self.pending_clipboard_image=None;
+        self.clipboard_temp=None;
+        self.pending_clipboard_files=files.into_iter().take(20).collect();
+        self.composer_sticker_selected=None;
+        self.composer_focus_pending=true;
+        self.send_error=None;
     }
 
     fn show_toast(&mut self, msg: impl Into<String>) {

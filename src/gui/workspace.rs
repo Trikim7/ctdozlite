@@ -922,6 +922,15 @@ impl ZaloGuiApp {
                             } else {
                                 row_resp
                             };
+                            row_resp.context_menu(|ui| {
+                                let muted = self.settings.muted_threads.contains(&t.id);
+                                if ui.button(if muted { "Bật thông báo hội thoại" } else { "Tắt thông báo hội thoại" }).clicked() {
+                                    if muted { self.settings.muted_threads.remove(&t.id); }
+                                    else { self.settings.muted_threads.insert(t.id.clone()); }
+                                    self.settings.save();
+                                    ui.close_menu();
+                                }
+                            });
                             if row_resp.clicked() {
                                 clicked_thread = Some((i, t.id.clone(), t.is_group));
                             }
@@ -1028,6 +1037,7 @@ impl ZaloGuiApp {
                     self.inline_video=None;self.video_loading_url=None;
                     self.sticker_textures.retain(|key,_|!key.starts_with("video_"));
                     if self.selected_thread_index != idx {
+                        self.send_error = None;
                         self.pending_clipboard_files.clear();self.pending_clipboard_image=None;self.clipboard_temp=None;
                         self.replying_to = None;
                         self.filter_starred_only = false;
@@ -1072,8 +1082,10 @@ impl ZaloGuiApp {
         // -------------------------------------------------------------------
         // 3. COLLAPSIBLE RIGHT CONVERSATION INFO DRAWER (responsive width)
         // -------------------------------------------------------------------
-        let show_info_drawer = self.info_drawer_open && !is_compact_w;
-        let drawer_w = (screen_w * 0.26).clamp(240.0, 310.0);
+        let remaining_w = ctx.available_rect().width();
+        let drawer_max_w = (remaining_w - 300.0).min(340.0);
+        let show_info_drawer = self.info_drawer_open && !is_compact_w && drawer_max_w >= 220.0;
+        let drawer_w = (screen_w * 0.26).clamp(220.0, 310.0).min(drawer_max_w);
 
         if show_info_drawer {
             if let Some((ref d_id, ref d_name, ref d_ava, d_is_group, d_msg_count)) = thread_meta {
@@ -1116,7 +1128,7 @@ impl ZaloGuiApp {
                 egui::SidePanel::right("conversation_info_drawer")
                     .resizable(true)
                     .default_width(drawer_w)
-                    .width_range(220.0..=340.0)
+                    .width_range(220.0..=drawer_max_w)
                     .frame(
                         egui::Frame::none()
                             .fill(pal.bg_sidebar)
@@ -2259,8 +2271,17 @@ impl ZaloGuiApp {
                         });
                     let mut pending_action: Option<(usize, BubbleAction)> = None;
                     let mut load_older_clicked = false;
+                    let mut group_avatars = HashMap::new();
+                    if is_group {
+                        for contact in self.threads.iter().filter(|t| !t.is_group) {
+                            group_avatars.entry(contact.name.as_str()).or_insert(contact.avatar.as_deref());
+                        }
+                    }
+                    let has_retry = self.failed_attachments.as_ref().is_some_and(|(id,_,_)|id==&thread_id);
                     let msg_area_height =
-                        (ui.available_height() - 66.0 - picker_reserve).max(100.0);
+                        (ui.available_height() - 66.0 - picker_reserve
+                            - if self.send_error.is_some() { 50.0 } else { 0.0 }
+                            - if has_retry { 28.0 } else { 0.0 }).max(24.0);
 
                     egui::ScrollArea::vertical()
                         .id_salt(Id::new(("chat_scroll", &thread_id)))
@@ -2329,7 +2350,7 @@ impl ZaloGuiApp {
                                                 String::new()
                                             };
                                             let in_chat_folded = fold_vn_search(&in_chat_q);
-                                            let visible_indices: Vec<usize> = thread
+                                            let visible_indices: Option<Vec<usize>> = (only_starred || !in_chat_q.is_empty()).then(|| thread
                                                 .messages
                                                 .iter()
                                                 .enumerate()
@@ -2348,8 +2369,13 @@ impl ZaloGuiApp {
                                                             ))
                                                 })
                                                 .map(|(i, _)| i)
-                                                .collect();
-                                            if visible_indices.is_empty() && !in_chat_q.is_empty() {
+                                                .collect());
+                                            let visible_count = visible_indices.as_ref().map_or(thread.messages.len(), Vec::len);
+                                            let index_at = |pos| match &visible_indices {
+                                                Some(indices) => indices.get(pos).copied(),
+                                                None => (pos < visible_count).then_some(pos),
+                                            };
+                                            if visible_count == 0 && !in_chat_q.is_empty() {
                                                 ui.vertical_centered(|ui| {
                                                     ui.add_space(56.0);
                                                     ui.label(
@@ -2372,15 +2398,15 @@ impl ZaloGuiApp {
                                                 })
                                                 .map(|(i, _)| i);
 
-                                            for (pos, &idx) in visible_indices.iter().enumerate() {
+                                            for pos in 0..visible_count {
+                                                let idx = index_at(pos).unwrap();
                                                 let msg = &thread.messages[idx];
                                                 let prev_msg = pos
                                                     .checked_sub(1)
-                                                    .and_then(|p| visible_indices.get(p))
-                                                    .map(|&pi| &thread.messages[pi]);
-                                                let next_msg = visible_indices
-                                                    .get(pos + 1)
-                                                    .map(|&ni| &thread.messages[ni]);
+                                                    .and_then(index_at)
+                                                    .map(|pi| &thread.messages[pi]);
+                                                let next_msg = index_at(pos + 1)
+                                                    .map(|ni| &thread.messages[ni]);
 
                                                 if should_show_time_divider(prev_msg, msg) {
                                                     if pos > 0 {
@@ -2408,10 +2434,7 @@ impl ZaloGuiApp {
                                                 let sender_ava_opt = if !is_group {
                                                     thread_avatar.as_deref()
                                                 } else {
-                                                    self.threads
-                                                        .iter()
-                                                        .find(|th| !th.is_group && th.name == msg.sender)
-                                                        .and_then(|th| th.avatar.as_deref())
+                                                    group_avatars.get(msg.sender.as_str()).copied().flatten()
                                                 };
                                                 if let Some(action) = render_chat_bubble(
                                                     ui,
@@ -2708,30 +2731,29 @@ impl ZaloGuiApp {
                             ui.horizontal_wrapped(|ui| {ui.colored_label(Color32::from_rgb(240,110,100),error);if ui.small_button("Đóng").clicked(){self.send_error=None;}});
                         });
                     }
+                    if has_retry {
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.small_button("Thử gửi lại tệp").clicked() {
+                                if let (Some(tx),Some((to_id,caption,files))) =
+                                    (WORKER_TX.get(),self.failed_attachments.take()) {
+                                    let _=tx.send(WorkerCmd::SendClipboardAttachments {to_id,is_group,caption,files});
+                                }
+                            }
+                            if ui.small_button("Bỏ tệp lỗi").clicked() { self.failed_attachments=None; }
+                        });
+                    }
                     // 4. Bottom Message Composer Bar (Compact Icon Actions + Spacious Input + Padded Send Button)
                     let composer_frame = egui::Frame::none()
                         .fill(pal.bg_sidebar)
                         .inner_margin(Margin::symmetric(14.0, 10.0))
                         .stroke(Stroke::new(1.0_f32, pal.border))
                         .show(ui, |ui| {
-                            // Handle drag-and-drop files onto the chat window
-                            let dropped: Vec<std::path::PathBuf> = ui.ctx().input(|i| {
-                                i.raw
-                                    .dropped_files
-                                    .iter()
-                                    .filter_map(|df| df.path.clone())
-                                    .collect()
-                            });
-                            for dpath in dropped {
-                                if let Some(tx) = WORKER_TX.get() {
-                                    let _ = tx.send(WorkerCmd::PickAndSendAttachment {
-                                        to_id: thread_id.clone(),
-                                        is_group,
-                                        images_only: false,
-                                        caption: String::new(),
-                                        preset_path: Some(dpath),
-                                    });
-                                }
+                            if !self.settings_modal_open {
+                                let dropped = ui.ctx().input_mut(|i| {
+                                    std::mem::take(&mut i.raw.dropped_files).into_iter()
+                                        .filter_map(|file| file.path).take(20).collect()
+                                });
+                                self.stage_files(&thread_id, dropped);
                             }
 
                             egui::Frame::none()
@@ -2800,15 +2822,10 @@ impl ZaloGuiApp {
                                             .on_hover_text("Gửi hình ảnh")
                                             .clicked()
                                         {
-                                            let cap = self.input_message.trim().to_string();
-                                            self.input_message.clear();
                                             if let Some(tx) = WORKER_TX.get() {
-                                                let _ = tx.send(WorkerCmd::PickAndSendAttachment {
+                                                let _ = tx.send(WorkerCmd::PickAttachments {
                                                     to_id: thread_id.clone(),
-                                                    is_group,
                                                     images_only: true,
-                                                    caption: cap,
-                                                    preset_path: None,
                                                 });
                                             }
                                         }
@@ -2840,15 +2857,10 @@ impl ZaloGuiApp {
                                             .on_hover_text("Đính kèm File / Video")
                                             .clicked()
                                         {
-                                            let cap = self.input_message.trim().to_string();
-                                            self.input_message.clear();
                                             if let Some(tx) = WORKER_TX.get() {
-                                                let _ = tx.send(WorkerCmd::PickAndSendAttachment {
+                                                let _ = tx.send(WorkerCmd::PickAttachments {
                                                     to_id: thread_id.clone(),
-                                                    is_group,
                                                     images_only: false,
-                                                    caption: cap,
-                                                    preset_path: None,
                                                 });
                                             }
                                         }
@@ -3004,10 +3016,14 @@ impl ZaloGuiApp {
                                         } else if (send_clicked || enter_pressed)
                                             && (self.pending_clipboard_image.is_some()||!self.pending_clipboard_files.is_empty()) {
                                             let mut files:Vec<crate::clipboard::Attachment>=self.pending_clipboard_files.drain(..).map(|path|crate::clipboard::Attachment {path,temporary:None}).collect();
-                                            if let Some((path,_,_,_))=self.pending_clipboard_image.take() {
+                                            let caption = if let Some((path,_,_,_))=self.pending_clipboard_image.take() {
                                                 files.push(crate::clipboard::Attachment {path,temporary:self.clipboard_temp.take()});
-                                            }
-                                            let caption=self.input_message.trim().to_string();self.input_message.clear();
+                                                std::mem::take(&mut self.input_message).trim().to_owned()
+                                            } else {
+                                                // The plain-file API does not transmit captions.
+                                                // Keep the draft available for a separate message.
+                                                String::new()
+                                            };
                                             self.dismissed_sticker_suggest_for.clear();self.composer_sticker_selected=None;response.request_focus();
                                             if let Some(tx)=WORKER_TX.get(){let _=tx.send(WorkerCmd::SendClipboardAttachments {to_id:thread_id.clone(),is_group,caption,files});}
                                         } else if (send_clicked || enter_pressed) && can_send {

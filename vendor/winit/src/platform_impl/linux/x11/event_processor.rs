@@ -113,7 +113,9 @@ impl EventProcessor {
                     // IBus Bamboo reuses a preedit session across word commits. XLookupString
                     // resets is_composing after a commit, but the next word can deliver Update
                     // without another Start. Never discard that valid preedit text.
-                    self.is_composing = true;
+                    self.is_composing = !text.is_empty();
+                    // Keep notifying the widget of an empty update so it clears the
+                    // marked text, but let subsequent editing keys reach the widget.
                     WindowEvent::Ime(Ime::Preedit(text, Some((position, position))))
                 },
                 ImeEvent::End => {

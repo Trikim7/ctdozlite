@@ -671,10 +671,21 @@ pub async fn send_attachment(
     let _permit=UPLOAD_SLOT.get_or_init(||tokio::sync::Semaphore::new(1)).acquire().await?;
     // Bound the existing in-memory multipart encoder even if a file grows after metadata check.
     const MAX_ATTACHMENT:usize=128*1024*1024;
-    let file=std::fs::File::open(file_path)?;
-    anyhow::ensure!(file.metadata()?.len()<=MAX_ATTACHMENT as u64,"Mỗi tệp hiện tối đa 128 MB để giữ mức dùng RAM thấp");
-    let mut file_bytes=Vec::new();std::io::Read::read_to_end(&mut std::io::Read::take(file,(MAX_ATTACHMENT+1) as u64),&mut file_bytes)?;
-    anyhow::ensure!(file_bytes.len()<=MAX_ATTACHMENT,"Tệp vượt quá 128 MB");
+    let path = file_path.to_owned();
+    let file_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+        use std::io::Read;
+        let meta = std::fs::metadata(&path)?;
+        anyhow::ensure!(meta.is_file(), "Hãy chọn một tệp, không phải thư mục hoặc thiết bị");
+        anyhow::ensure!(meta.len()<=MAX_ATTACHMENT as u64,"Mỗi tệp hiện tối đa 128 MB");
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        let file = options.open(path)?;
+        anyhow::ensure!(file.metadata()?.is_file(),"Tệp không còn hợp lệ");
+        let mut bytes = Vec::with_capacity(meta.len() as usize);
+        file.take((MAX_ATTACHMENT+1) as u64).read_to_end(&mut bytes)?;
+        anyhow::ensure!(bytes.len()<=MAX_ATTACHMENT,"Tệp vượt quá 128 MB");
+        Ok(bytes)
+    }).await??;
     if file_bytes.is_empty() {
         anyhow::bail!("Tập tin rỗng (0 byte)");
     }
@@ -718,8 +729,8 @@ pub async fn send_attachment(
     let target_type = if is_group { 11 } else { 2 };
 
     if is_image {
-        let (width, height) = image::load_from_memory(&file_bytes)
-            .map(|img| (img.width(), img.height()))
+        let (width, height) = image::ImageReader::new(std::io::Cursor::new(&file_bytes))
+            .with_guessed_format().ok().and_then(|reader| reader.into_dimensions().ok())
             .unwrap_or((800, 600));
         let upload_ep = if is_group {
             "/api/group/photo_original/upload"
@@ -879,7 +890,8 @@ pub async fn send_attachment(
 
     drop(file_bytes); // Do not retain a large file while waiting for the completion event.
     let mut completed_data=attachment_data(&last_up_dec,"Tải tệp lên",true)?.clone();
-    if pick_str(&completed_data,&["fileUrl","url"]).is_none() {
+    if !pick_str(&completed_data,&["fileUrl","url","normalUrl"]).as_deref()
+        .is_some_and(crate::inline_video::trusted_media_url) {
         let id=pick_str(&completed_data,&["fileId"]).filter(|id|id!="-1" && id!="0")
             .ok_or_else(||anyhow::anyhow!("Zalo chưa xác nhận mã tệp tải lên"))?;
         let owner=&s.login.as_ref().unwrap().uin;
