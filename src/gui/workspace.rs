@@ -930,11 +930,9 @@ impl ZaloGuiApp {
                                 row_resp
                             };
                             row_resp.context_menu(|ui| {
-                                let muted = self.settings.muted_threads.contains(&t.id);
+                                let muted = self.settings.muted(&self.user_uin,&t.id,t.is_group);
                                 if ui.button(if muted { "Bật thông báo hội thoại" } else { "Tắt thông báo hội thoại" }).clicked() {
-                                    if muted { self.settings.muted_threads.remove(&t.id); }
-                                    else { self.settings.muted_threads.insert(t.id.clone()); }
-                                    self.settings.save();
+                                    if let Some(tx)=WORKER_TX.get(){let _=tx.send(WorkerCmd::SetMute{id:t.id.clone(),is_group:t.is_group,muted:!muted});}
                                     ui.close_menu();
                                 }
                             });
@@ -1036,6 +1034,7 @@ impl ZaloGuiApp {
 
                 if let Some((idx, q_str)) = clicked_msg_hit {
                     self.selected_thread_index = idx;
+                    self.mark_thread_read(idx);
                     self.in_chat_search_open = true;
                     self.in_chat_search_focus_pending = true;
                     self.in_chat_search_query = q_str;
@@ -2279,11 +2278,8 @@ impl ZaloGuiApp {
                     // area and composer input box never shift or lose IME focus while typing.
                     let picker_reserve = (if self.sticker_picker_open { 268.0 } else { 0.0 })
                         + (if self.replying_to.is_some() { 48.0 } else { 0.0 })
-                        + (if self.pending_clipboard_image.is_some() || !self.pending_clipboard_files.is_empty() {
-                            64.0
-                        } else {
-                            0.0
-                        });
+                        + (if self.pending_clipboard_image.is_some() { 64.0 } else { 0.0 })
+                        + (if !self.pending_clipboard_files.is_empty() { 52.0 } else { 0.0 });
                     let mut pending_action: Option<(usize, BubbleAction)> = None;
                     let mut load_older_clicked = false;
                     let mut group_avatars = HashMap::new();
@@ -2418,7 +2414,9 @@ impl ZaloGuiApp {
                                                 })
                                                 .map(|(i, _)| i);
 
+                                            let mut album_skip=0;
                                             for pos in 0..visible_count {
+                                                if pos<album_skip {continue;}
                                                 let idx = index_at(pos).unwrap();
                                                 let msg = &thread.messages[idx];
                                                 let prev_msg = pos
@@ -2440,6 +2438,43 @@ impl ZaloGuiApp {
                                                     render_system_notice_pill(ui, msg, pal);
                                                     ui.add_space(6.0);
                                                     continue;
+                                                }
+                                                if let Some(album)=&msg.album {
+                                                    let members:Vec<_>=(pos..visible_count).take(20).map_while(|p|{
+                                                        let i=index_at(p)?;let m=&thread.messages[i];
+                                                        (m.album.as_ref().is_some_and(|a|a.id==album.id)&&m.sender==msg.sender&&m.is_outgoing==msg.is_outgoing&&m.link_src.as_deref()==Some("Hình ảnh Zalo")).then_some((i,m))
+                                                    }).collect();
+                                                    if members.len()>1 {
+                                                        album_skip=pos+members.len();
+                                                        let layout=if msg.is_outgoing{Layout::right_to_left(Align::TOP)}else{Layout::left_to_right(Align::TOP)};
+                                                        ui.with_layout(layout,|ui|{
+                                                            ui.vertical(|ui|{
+                                                                ui.set_max_width(ui.available_width().min(330.0));
+                                                                ui.label(RichText::new(format!("{} · Album {} ảnh",msg.sender,album.total)).size(12.0).color(pal.text_muted));
+                                                                let edge=((ui.available_width()-8.0)/2.0).clamp(44.0,155.0);
+                                                                for row in members.chunks(2){
+                                                                    ui.horizontal(|ui|{
+                                                                        for (i,m) in row {
+                                                                            let Some(url)=m.link_thumb.as_deref().or(m.link_url.as_deref()) else{continue;};
+                                                                            let key=format!("thumb_{}",crate::crypto::md5_hex(url));
+                                                                            if media_visible(ui)&&!self.sticker_textures.contains_key(&key)&&self.loading_stickers.insert(key.clone()){
+                                                                                if let Some(tx)=WORKER_TX.get(){let _=tx.send(WorkerCmd::FetchStickerImage{key:key.clone(),url:url.into()});}
+                                                                            }
+                                                                            let response=if let Some(tex)=self.sticker_textures.get(&key){
+                                                                                ui.add(egui::Image::new(tex).fit_to_exact_size(Vec2::splat(edge)).sense(Sense::click()))
+                                                                            }else{ui.add_sized(Vec2::splat(edge),egui::Button::new("Ảnh"))};
+                                                                            if response.clicked(){pending_action=Some((*i,BubbleAction::OpenImagePopup{tex_key:key,full_url:m.link_url.as_deref().unwrap_or(url).into(),title:m.link_title.clone().unwrap_or_default(),sender:m.sender.clone(),time:m.time.clone()}));}
+                                                                            if let Some(action)=bubble_context_menu(ui,&response,m,*i,pal,&self.emoji_textures,true){pending_action=Some((*i,action));}
+                                                                        }
+                                                                    });
+                                                                }
+                                                                if let Some(caption)=&msg.link_desc{ui.label(caption);}
+                                                                ui.label(RichText::new(&msg.time).size(11.0).color(pal.text_muted));
+                                                            });
+                                                        });
+                                                        ui.add_space(8.0);
+                                                        continue;
+                                                    }
                                                 }
 
                                                 let prev_same_sender = prev_msg
@@ -2508,6 +2543,13 @@ impl ZaloGuiApp {
                         if let Some(m) = target {
                             match action {
                                 BubbleAction::Reply => self.replying_to = Some(m),
+                                BubbleAction::PreviewDocument{url,title}=>{
+                                    if let Some(ext)=crate::document_preview::extension(&title){
+                                        self.document_id=self.document_id.wrapping_add(1);
+                                        self.document_preview=Some((title,None));
+                                        if let Some(tx)=WORKER_TX.get(){let _=tx.send(WorkerCmd::PreviewDocument{id:self.document_id,url,ext});}
+                                    }
+                                }
                                 BubbleAction::Forward => {
                                     self.forward_msg = Some(m);
                                     self.forward_filter.clear();
@@ -2749,12 +2791,12 @@ impl ZaloGuiApp {
                     }
                     if !self.pending_clipboard_files.is_empty() {
                         if render_clipboard_files(ui,pal,&self.pending_clipboard_files)||ui.input(|i|i.key_pressed(Key::Escape)) {
-                            self.pending_clipboard_files.clear();self.pending_clipboard_thread=None;
+                            self.pending_clipboard_files.clear();if self.pending_clipboard_image.is_none(){self.pending_clipboard_thread=None;}
                         }
                     }
                     if let Some((_,w,h,texture))=self.pending_clipboard_image.as_ref() {
                         if render_clipboard_image(ui,pal,texture,*w,*h)||ui.input(|i|i.key_pressed(Key::Escape)) {
-                            self.pending_clipboard_image=None;self.clipboard_temp=None;self.pending_clipboard_thread=None;
+                            self.pending_clipboard_image=None;self.clipboard_temp=None;if self.pending_clipboard_files.is_empty(){self.pending_clipboard_thread=None;}
                         }
                     }
 
@@ -3049,7 +3091,7 @@ impl ZaloGuiApp {
                                             && (self.pending_clipboard_image.is_some()||!self.pending_clipboard_files.is_empty()) {
                                             let mut files:Vec<crate::clipboard::Attachment>=self.pending_clipboard_files.drain(..).map(|path|crate::clipboard::Attachment {path,temporary:None}).collect();
                                             let caption = if let Some((path,_,_,_))=self.pending_clipboard_image.take() {
-                                                files.push(crate::clipboard::Attachment {path,temporary:self.clipboard_temp.take()});
+                                                files.insert(0,crate::clipboard::Attachment {path,temporary:self.clipboard_temp.take()});
                                                 std::mem::take(&mut self.input_message).trim().to_owned()
                                             } else {
                                                 // The plain-file API does not transmit captions.

@@ -303,6 +303,24 @@ pub(super) fn open_external_url(url: &str) {
     }
 }
 /// Open a native OS file-picker dialog on a worker thread and return the selected path.
+pub(super) fn pick_native_files(images_only: bool) -> Vec<std::path::PathBuf> {
+    #[cfg(target_os="linux")]
+    {
+        let mut cmd=std::process::Command::new("zenity");
+        cmd.args(["--file-selection","--multiple","--separator=\n"]);
+        if images_only {cmd.arg("--file-filter=Images | *.png *.jpg *.jpeg *.webp *.gif *.bmp");}
+        if let Ok(out)=cmd.output(){
+            if out.status.success(){return String::from_utf8_lossy(&out.stdout).lines().take(20).map(Into::into).collect();}
+            if out.status.code()==Some(1){return Vec::new();}
+        }
+        if let Ok(out)=std::process::Command::new("kdialog").args(["--getopenfilename",".","--multiple","--separate-output"]).output(){
+            if out.status.success(){return String::from_utf8_lossy(&out.stdout).lines().take(20).map(Into::into).collect();}
+        }
+        Vec::new()
+    }
+    #[cfg(not(target_os="linux"))]
+    {pick_native_file_dialog(images_only).into_iter().collect()}
+}
 pub(super) fn pick_native_file_dialog(images_only: bool) -> Option<std::path::PathBuf> {
     #[cfg(target_os = "windows")]
     {
@@ -1188,7 +1206,15 @@ pub(super) fn render_message_body(
             .on_hover_cursor(CursorIcon::PointingHand);
         if resp.clicked() {
             if let Some(url) = msg.link_url.as_deref().filter(|u| !u.is_empty()) {
+                if crate::document_preview::extension(title_str).is_some() {
+                    return Some(BubbleAction::PreviewDocument{url:url.into(),title:title_str.into()});
+                }
                 open_external_url(url);
+            }
+        }
+        if crate::document_preview::extension(title_str).is_some() {
+            if let Some(url)=msg.link_url.as_deref().filter(|u|!u.is_empty()) {
+                if ui.small_button("Xem trước").clicked(){return Some(BubbleAction::PreviewDocument{url:url.into(),title:title_str.into()});}
             }
         }
         ui.add_space(2.0);
@@ -1826,6 +1852,7 @@ pub(super) fn render_chat_bubble(
 
 #[derive(Clone, PartialEq)]
 pub(super) enum BubbleAction {
+    PreviewDocument {url:String,title:String},
     Reply,
     Forward,
     React(&'static str),

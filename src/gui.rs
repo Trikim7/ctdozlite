@@ -46,6 +46,8 @@ use theme::*;
 use worker::*;
 
 pub enum GuiEvent {
+    MuteSnapshot{owner:String,result:Result<HashMap<String,i64>,String>,requested:bool},
+    DocumentReady{id:u64,result:Result<crate::document_preview::Preview,String>},
     QrReady {
         qr_login: QrLogin,
         qr_image: egui::ColorImage,
@@ -222,6 +224,8 @@ struct AppSettings {
     // 4. Thông báo
     enable_notifications: bool,
     muted_threads: HashSet<String>,
+    read_points: HashMap<String,HashMap<String,i64>>,
+    server_mutes: HashMap<String,HashMap<String,i64>>,
     play_notification_sound: bool,
     // 5. Tin nhắn
     quick_messages_enabled: bool,
@@ -271,6 +275,8 @@ impl Default for AppSettings {
             use_avatar_as_wallpaper: false,
             enable_notifications: true,
             muted_threads: HashSet::new(),
+            read_points:HashMap::new(),
+            server_mutes:HashMap::new(),
             play_notification_sound: false,
             quick_messages_enabled: true,
             hidden_chat_pin_enabled: true,
@@ -290,6 +296,9 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    fn muted(&self,owner:&str,id:&str,is_group:bool)->bool {
+        self.server_mutes.get(owner).map(|m|m.get(&crate::mute::key(id,is_group)).is_some_and(|t|*t<0||*t>crate::login::unix_now())).unwrap_or_else(||self.muted_threads.contains(id))
+    }
     fn load() -> Self {
         std::fs::read_to_string("app_settings.json")
             .ok()
@@ -306,6 +315,8 @@ impl AppSettings {
 
 
 pub struct ZaloGuiApp {
+    document_id:u64,
+    document_preview:Option<(String,Option<Result<crate::document_preview::Preview,String>>)>,
     persistence_dirty: std::cell::Cell<bool>,
     // Theme state
     dark_mode: bool,
@@ -450,7 +461,7 @@ impl ZaloGuiApp {
         initial_threads: Vec<Thread>,
     ) -> Self {
         setup_custom_fonts(&cc.egui_ctx);
-        let loaded_settings = AppSettings::load();
+        let mut loaded_settings = AppSettings::load();
         crate::media::set_selected_mic_device(&loaded_settings.selected_mic_device);
         crate::media::set_selected_output_device(&loaded_settings.selected_output_device);
         crate::media::set_selected_camera_device(&loaded_settings.selected_camera_device);
@@ -507,6 +518,16 @@ impl ZaloGuiApp {
             .max_by_key(|(_, t)| t.messages.last().map(|m| m.ts).unwrap_or(0))
             .map(|(idx, _)| idx)
             .unwrap_or(0);
+        let mut unread_counts=HashMap::new();
+        if is_logged_in {
+            let points=loaded_settings.read_points.entry(user_uin.clone()).or_default();
+            for t in &threads {
+                let point=points.entry(t.id.clone()).or_insert_with(||t.messages.iter().map(|m|m.ts).max().unwrap_or(0));
+                let count=t.messages.iter().filter(|m|!m.is_outgoing&&m.ts>*point).count();
+                if count>0{unread_counts.insert(t.id.clone(),count);}
+            }
+            loaded_settings.save();
+        }
 
         let app = Self {
             dark_mode,
@@ -598,7 +619,9 @@ impl ZaloGuiApp {
             clipboard_temp: None,
             pending_clipboard_files: Vec::new(),
             pending_clipboard_image: None,
-            unread_counts: HashMap::new(),
+            unread_counts,
+            document_id:0,
+            document_preview:None,
             link_metadata_cache: HashMap::new(),
             loading_link_previews: HashSet::new(),
             dismissed_link_preview_for: String::new(),
@@ -730,33 +753,35 @@ impl ZaloGuiApp {
                         let mut new_incoming_alert = false;
                         let mut changed = false;
 
+                        let server_mutes=self.settings.server_mutes.get(&self.user_uin);
+                        let local_mutes=&self.settings.muted_threads;
+                        let points=self.settings.read_points.entry(self.user_uin.clone()).or_default();
+                        let mut points_changed=false;
                         for nt in updates {
                             if let Some(existing) = self.threads.iter_mut().find(|t| t.id == nt.id)
                             {
-                                let old_len = existing.messages.len();
+                                let point=points.entry(existing.id.clone()).or_insert_with(||{points_changed=true;existing.messages.iter().map(|m|m.ts).max().unwrap_or(0)});
+                                let old_count=existing.messages.iter().rev().take_while(|m|m.ts>*point).filter(|m|!m.is_outgoing).count();
                                 changed |= crate::chat::merge_thread_into(existing, nt, true);
-                                let added = existing.messages.len().saturating_sub(old_len);
-                                if added > 0 {
-                                    let inc_cnt = existing
-                                        .messages
-                                        .iter()
-                                        .rev()
-                                        .take(added)
-                                        .filter(|m| !m.is_outgoing)
-                                        .count();
-                                    if inc_cnt > 0 && (existing.id != active_tid || !is_focused) {
-                                        *self
-                                            .unread_counts
-                                            .entry(existing.id.clone())
-                                            .or_insert(0) += inc_cnt;
-                                        new_incoming_alert |= !self.settings.muted_threads.contains(&existing.id);
-                                    }
+                                if existing.id==active_tid && is_focused {
+                                    let latest=existing.messages.iter().map(|m|m.ts).max().unwrap_or(0);
+                                    if latest>*point {*point=latest;points_changed=true;}
+                                    self.unread_counts.remove(&existing.id);
+                                } else {
+                                    let count=existing.messages.iter().rev().take_while(|m|m.ts>*point).filter(|m|!m.is_outgoing).count();
+                                    if count>0 {self.unread_counts.insert(existing.id.clone(),count);}else{self.unread_counts.remove(&existing.id);}
+                                    let muted=server_mutes.map(|m|m.get(&crate::mute::key(&existing.id,existing.is_group)).is_some_and(|t|*t<0||*t>crate::login::unix_now())).unwrap_or_else(||local_mutes.contains(&existing.id));
+                                    if count>old_count && !muted {new_incoming_alert=true;}
                                 }
                             } else if !nt.id.is_empty() && nt.id != "0" {
+                                let point=points.entry(nt.id.clone()).or_insert_with(||{points_changed=true;nt.messages.iter().map(|m|m.ts).max().unwrap_or(0)});
+                                let count=nt.messages.iter().filter(|m|!m.is_outgoing&&m.ts>*point).count();
+                                if count>0 {self.unread_counts.insert(nt.id.clone(),count);}
                                 self.threads.push(nt);
                                 changed = true;
                             }
                         }
+                        if points_changed {self.settings.save();}
 
                         if new_incoming_alert && self.settings.enable_notifications {
                             let total_unread: usize = self.unread_counts.values().sum();
@@ -1000,6 +1025,8 @@ impl ZaloGuiApp {
                 GuiEvent::AliasesUpdated {owner,result} => {
                     if owner==self.user_uin {self.alias_sync_pending=false;if let Ok(aliases)=result {if self.nicknames!=aliases {self.nicknames=aliases;self.sidebar_revision=self.sidebar_revision.wrapping_add(1);}}}
                 }
+                GuiEvent::MuteSnapshot{owner,result,requested}=>{if owner==self.user_uin {match result{Ok(map)=>{if self.settings.server_mutes.get(&owner)!=Some(&map){self.settings.server_mutes.insert(owner,map);self.settings.save();}if requested{self.show_toast("Đã đồng bộ trạng thái thông báo.");}},Err(error)=>{if requested{self.show_toast(error);}}}}},
+                GuiEvent::DocumentReady{id,result}=>{if id==self.document_id {if let Some((_,state))=&mut self.document_preview {*state=Some(result);}}},
                 GuiEvent::PickedAttachments {thread_id,files} => self.stage_files(&thread_id, files),
                 GuiEvent::ClipboardReady {thread_id,result} => {
                     self.clipboard_loading=false;
@@ -1008,9 +1035,10 @@ impl ZaloGuiApp {
                             Ok(crate::clipboard::Contents::Image(image))=>{
                                 self.pending_clipboard_thread=Some(thread_id.clone());
                                 let path=image.path.to_path_buf();let texture=ctx.load_texture("clipboard_preview",image.preview,TextureOptions::LINEAR);
-                                self.pending_clipboard_image=Some((path,image.width,image.height,texture));self.clipboard_temp=Some(image.path);self.pending_clipboard_files.clear();self.composer_sticker_selected=None;self.composer_focus_pending=true;
+                                if self.pending_clipboard_image.is_some()||self.pending_clipboard_files.len()>=20 {self.show_toast("Đã có ảnh chờ gửi hoặc đủ 20 tệp; hãy gửi trước.");continue;}
+                                self.pending_clipboard_image=Some((path,image.width,image.height,texture));self.clipboard_temp=Some(image.path);self.composer_sticker_selected=None;self.composer_focus_pending=true;
                             }
-                            Ok(crate::clipboard::Contents::Files(files))=>{self.pending_clipboard_thread=Some(thread_id.clone());self.composer_sticker_selected=None;self.pending_clipboard_image=None;self.clipboard_temp=None;self.pending_clipboard_files=files;self.composer_focus_pending=true;}
+                            Ok(crate::clipboard::Contents::Files(files))=>self.stage_files(&thread_id,files),
                             Ok(crate::clipboard::Contents::Text(text))=>{
                                 insert_clipboard_text(ctx,&thread_id,&mut self.input_message,&text);self.composer_focus_pending=true;
                             }
@@ -1229,7 +1257,7 @@ impl ZaloGuiApp {
                         error_code: None,
                         error_reason: None,
                     });
-                    if self.settings.enable_notifications && !self.settings.muted_threads.contains(&caller_id) {
+                    if self.settings.enable_notifications && !self.settings.muted(&self.user_uin,&caller_id,false) {
                         ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
                             egui::UserAttentionType::Critical,
                         ));
@@ -1286,6 +1314,14 @@ impl eframe::App for ZaloGuiApp {
 
         ctx.input(|i| self.ime_state.update(&i.events));
         self.check_events(ctx);
+        if self.is_logged_in&&ctx.input(|i|i.focused) {
+            if let Some(t)=self.threads.get(self.selected_thread_index) {
+                if self.unread_counts.remove(&t.id).is_some() {
+                    self.mark_thread_read(self.selected_thread_index);
+                    self.sidebar_revision=self.sidebar_revision.wrapping_add(1);
+                }
+            }
+        }
         if !self.is_logged_in || self.pending_clipboard_thread.as_deref().is_some_and(|id|self.threads.get(self.selected_thread_index).map(|t|t.id.as_str())!=Some(id)) {
             self.pending_clipboard_image=None;self.clipboard_temp=None;self.pending_clipboard_files.clear();self.pending_clipboard_thread=None;
         }
@@ -1401,6 +1437,34 @@ impl eframe::App for ZaloGuiApp {
                 });
         } else {
             self.render_chat_workspace(ctx, &pal);
+        }
+        if !self.is_logged_in {self.document_preview=None;}
+        if let Some((title,state))=&self.document_preview {
+            let mut open=true;
+            egui::Window::new("Xem trước tài liệu").id(Id::new("document_preview")).open(&mut open)
+                .default_size(Vec2::new(640.0,460.0)).show(ctx,|ui|{
+                    ui.heading(title);ui.separator();
+                    match state {
+                        None=>{ui.spinner();ui.label("Đang đọc tài liệu…");},
+                        Some(Err(error))=>{ui.label(error);},
+                        Some(Ok(preview))=>{
+                            if preview.truncated {ui.label("Chỉ hiển thị phần đầu tài liệu.");}
+                            egui::ScrollArea::both().auto_shrink([false,false]).show(ui,|ui|{
+                                match crate::document_preview::extension(title).as_deref() {
+                                    Some("md"|"markdown")=>{
+                                        for line in preview.text.lines().take(1000) {
+                                            let n=line.bytes().take_while(|c|*c==b'#').count();
+                                            if (1..=6).contains(&n)&&line.as_bytes().get(n)==Some(&b' '){ui.label(RichText::new(line[n+1..].trim()).size((23.0-n as f32*1.5).max(15.0)).strong());}
+                                            else{ui.label(line);}
+                                        }
+                                    },
+                                    _=>{ui.add(egui::Label::new(RichText::new(&preview.text).monospace()).selectable(true));}
+                                }
+                            });
+                        }
+                    }
+                });
+            if !open {self.document_preview=None;self.document_id=self.document_id.wrapping_add(1);}
         }
 
         if self.persistence_dirty.replace(false) {
@@ -1957,12 +2021,20 @@ impl ZaloGuiApp {
             return;
         }
         self.pending_clipboard_thread=Some(thread_id.to_owned());
-        self.pending_clipboard_image=None;
-        self.clipboard_temp=None;
-        self.pending_clipboard_files=files.into_iter().take(20).collect();
+        for path in files {
+            if self.pending_clipboard_files.len()+usize::from(self.pending_clipboard_image.is_some())>=20 {break;}
+            if path.is_file() && !self.pending_clipboard_files.contains(&path) {self.pending_clipboard_files.push(path);}
+        }
         self.composer_sticker_selected=None;
         self.composer_focus_pending=true;
         self.send_error=None;
+    }
+
+    fn mark_thread_read(&mut self,idx:usize) {
+        let Some(t)=self.threads.get(idx) else{return;};
+        let latest=t.messages.last().map(|m|m.ts).unwrap_or(0);
+        let point=self.settings.read_points.entry(self.user_uin.clone()).or_default().entry(t.id.clone()).or_insert(0);
+        if latest>*point {*point=latest;self.settings.save();}
     }
 
     fn show_toast(&mut self, msg: impl Into<String>) {

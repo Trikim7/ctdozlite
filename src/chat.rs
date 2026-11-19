@@ -43,8 +43,25 @@ pub struct ChatMessage {
     pub link_thumb: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_src: Option<String>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub album:Option<Album>,
 }
 
+#[derive(Debug,Clone,PartialEq,Eq,serde::Serialize,serde::Deserialize)]
+pub struct Album {pub id:String,pub index:usize,pub total:usize}
+impl Album {
+    fn from_content(content:&Value)->Option<Self>{
+        let parse=|v:&Value|if v.is_object(){Some(v.clone())}else{serde_json::from_str(v.as_str()?).ok()};
+        let content=parse(content)?;
+        let p=parse(content.get("params")?)?;
+        let num=|a:&str,b:&str| {let v=p.get(a).or_else(||p.get(b))?;v.as_u64().or_else(||v.as_str()?.parse().ok()).or_else(||v.as_bool().map(u64::from))};
+        if num("is_group_layout","isGroupLayout")?!=1{return None;}
+        let id=pick_str(&p,&["group_layout_id","groupLayoutId"])?;
+        let index=num("id_in_group","idInGroup")? as usize;
+        let total=num("total_item_in_group","totalItemInGroup")? as usize;
+        (!id.is_empty()&&id.len()<=128&&total>=2&&total<=100&&index<total).then_some(Self{id,index,total})
+    }
+}
 impl ChatMessage {
     /// Compute the static PNG URL for a Zalo sticker (`compact-app-pc.b7bec208c4c8f73e09f8.js:7739583` & `18589292`).
     pub fn sticker_image_url(&self) -> Option<String> {
@@ -252,6 +269,7 @@ pub fn merge_thread_into(
             if existing_msg.reactions.is_empty() && !msg.reactions.is_empty() {
                 existing_msg.reactions = msg.reactions;
             }
+            if existing_msg.album.is_none(){existing_msg.album=msg.album;}
             existing_msg.is_pinned = existing_msg.is_pinned || msg.is_pinned;
             existing_msg.is_starred = existing_msg.is_starred || msg.is_starred;
             if before.id != existing_msg.id { index.insert(i, existing_msg); }
@@ -673,6 +691,12 @@ pub async fn send_attachment(
     file_path: &std::path::Path,
     caption: &str,
 ) -> Result<(Value, ChatMessage)> {
+    send_attachment_album(s,to_id,is_group,file_path,caption,None).await
+}
+pub async fn send_attachment_album(
+    s:&Session,to_id:&str,is_group:bool,file_path:&std::path::Path,caption:&str,
+    album:Option<(&str,usize,usize)>,
+) -> Result<(Value,ChatMessage)> {
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
@@ -805,6 +829,13 @@ pub async fn send_attachment(
             send_obj.insert("zsource".into(), json!(-1));
             send_obj.insert("jcp".into(), json!("{\"convertible\":true}"));
             send_obj.insert("imei".into(), json!(s.imei));
+            if let Some((id,index,total))=album {
+                send_obj.insert("groupLayoutId".into(),json!(id));
+                send_obj.insert("isGroupLayout".into(),json!(1));
+                send_obj.insert("idInGroup".into(),json!(index));
+                send_obj.insert("totalItemInGroup".into(),json!(total));
+                send_obj.insert("extMsgProp".into(),json!(json!({"groupMediaMsg":{"groupLayoutId":id}}).to_string()));
+            }
             if is_group {
                 send_obj.insert("grid".into(), json!(clean_target));
                 send_obj.insert("visibility".into(), json!(0));
@@ -857,6 +888,7 @@ pub async fn send_attachment(
             },
             link_thumb: Some(final_thumb),
             link_src: Some("Hình ảnh Zalo".into()),
+            album:album.map(|(id,index,total)|Album{id:id.into(),index,total}),
             ..Default::default()
         };
         return Ok((send_resp, cm));
@@ -3426,6 +3458,7 @@ pub(crate) fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         link_desc,
         link_thumb,
         link_src,
+        album:raw_content_val.and_then(Album::from_content),
     })
 }
 

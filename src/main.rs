@@ -6,6 +6,8 @@
 
 mod account_storage;
 mod attachment_events;
+mod document_preview;
+mod mute;
 mod audio;
 mod call;
 mod chat;

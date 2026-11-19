@@ -1,6 +1,9 @@
 use super::*;
 
 pub enum WorkerCmd {
+    RefreshMute,
+    SetMute{id:String,is_group:bool,muted:bool},
+    PreviewDocument {id:u64,url:String,ext:String},
     RequestQr,
     RefreshAliases,
     ReadClipboard {thread_id:String,fallback:Option<String>},
@@ -349,17 +352,46 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
 
                 let mut known_threads = None::<Vec<(String,String,bool)>>;
                 let mut poll_timer=tokio::time::interval(Duration::from_millis(1200));
+                let mut mute_timer=tokio::time::interval(Duration::from_secs(30));
+                mute_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let mute_slot=std::sync::Arc::new(tokio::sync::Mutex::new(()));
                 poll_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 let last_poll_batch=std::sync::Arc::new(std::sync::Mutex::new(memory::PollBatch::default()));
                 loop {
                     let cmd = tokio::select! {
                         command=cmd_rx.recv() => match command {Some(cmd)=>cmd,None=>break},
+                        _=mute_timer.tick()=>WorkerCmd::RefreshMute,
                         _=poll_timer.tick()=>match known_threads.as_ref() {
                             Some(threads)=>WorkerCmd::PollMessages{known_threads:threads.clone()},
                             None=>continue,
                         }
                     };
                     match cmd {
+                        cmd @ (WorkerCmd::RefreshMute|WorkerCmd::SetMute{..})=>{
+                            let s=session.lock().await.clone();
+                            let Some(owner)=s.login.as_ref().map(|l|l.uin.clone()) else{continue;};
+                            let tx=gui_tx.clone();let ctx=egui_ctx.clone();let slot=mute_slot.clone();
+                            tokio::spawn(async move{
+                                let _guard=if matches!(&cmd,WorkerCmd::RefreshMute){match slot.try_lock(){Ok(guard)=>guard,Err(_)=>return}}else{slot.lock().await};
+                                let is_change=matches!(&cmd,WorkerCmd::SetMute{..});
+                                let result=async{
+                                    if let WorkerCmd::SetMute{id,is_group,muted}=cmd {crate::mute::set(&s,&id,is_group,muted).await?;}
+                                    crate::mute::fetch(&s).await
+                                }.await.map_err(|_|"Không đồng bộ được thông báo".into());
+                                let _=tx.send(GuiEvent::MuteSnapshot{owner,result,requested:is_change});ctx.request_repaint();
+                            });
+                        }
+                        WorkerCmd::PreviewDocument{id,url,ext}=>{
+                            let s=session.lock().await.clone();let tx=gui_tx.clone();let ctx=egui_ctx.clone();
+                            tokio::spawn(async move{
+                                static SLOT:tokio::sync::Semaphore=tokio::sync::Semaphore::const_new(1);
+                                let result=async {
+                                    let _permit=SLOT.try_acquire()?;
+                                    tokio::time::timeout(Duration::from_secs(45),crate::document_preview::read(&s.http,&url,&ext)).await?
+                                }.await.map_err(|_:anyhow::Error|"Không thể xem trước tài liệu. Tệp có thể hết hạn, quá 10 MB hoặc không đọc được.".to_string());
+                                let _=tx.send(GuiEvent::DocumentReady{id,result});ctx.request_repaint();
+                            });
+                        }
                         WorkerCmd::UpdatePollThreads { known_threads: updated } => {
                             known_threads=Some(updated);
                         }
@@ -390,10 +422,17 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                             let _=tx.send(GuiEvent::AttachmentUploading);ctx.request_repaint();
                             tokio::spawn(async move {
                                 let s=shared.lock().await.clone();
+                                let is_photo=|f:&crate::clipboard::Attachment|f.path.extension().and_then(|e|e.to_str()).is_some_and(|e|matches!(e.to_ascii_lowercase().as_str(),"png"|"jpg"|"jpeg"|"webp"|"bmp"));
+                                let total=files.iter().filter(|f|is_photo(f)).count();
+                                let album_id=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis().to_string();
+                                let mut photo_index=0;
+                                let mut files=files;
+                                if total>=2{files.sort_by_key(|f|!is_photo(f));}
                                 let mut files = files.into_iter();
                                 let mut caption = caption;
                                 while let Some(file) = files.next() {
-                                    let result=crate::chat::send_attachment(&s,&to_id,is_group,&file.path,&caption).await;
+                                    let album=if total>=2 && is_photo(&file){let i=photo_index;photo_index+=1;Some((album_id.as_str(),i,total))}else{None};
+                                    let result=crate::chat::send_attachment_album(&s,&to_id,is_group,&file.path,&caption,album).await;
                                     match result {
                                         Ok((_,msg))=>{
                                             caption.clear();
@@ -1388,8 +1427,9 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                             let ctx = egui_ctx.clone();
                             tokio::task::spawn_blocking(move || {
                                 let _guard = guard;
-                                if let Some(path) = pick_native_file_dialog(images_only) {
-                                    let _ = tx.send(GuiEvent::PickedAttachments { thread_id: to_id, files: vec![path] });
+                                let files=pick_native_files(images_only);
+                                if !files.is_empty() {
+                                    let _ = tx.send(GuiEvent::PickedAttachments { thread_id: to_id, files });
                                     ctx.request_repaint();
                                 }
                             });

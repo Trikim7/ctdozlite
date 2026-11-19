@@ -166,16 +166,17 @@ fn wire_message(message:&Value,own:&str,users:&HashMap<String,String>,names:&Has
 pub async fn run(s:Session,outbound:mpsc::UnboundedSender<SocketCommand>,mut events:broadcast::Receiver<WsEvent>,mut cancel:watch::Receiver<bool>,mut notify:impl FnMut(Update)+Send)->Result<String> {
     ensure!(s.login.is_some(),"Cần đăng nhập trước khi đồng bộ điện thoại");
     notify(Update::Status("Đang chuẩn bị bộ giải mã và danh sách hội thoại Android…".into()));
-    let mut bridge=Bridge::start(&s).await?;
-    let mut mapping=Mapping::load(&s).await?;let mut index=0u32;
+    let mut bridge=tokio::select!{result=Bridge::start(&s)=>result?,_=cancel.changed()=>bail!("Đã dừng đồng bộ")};
+    let mut mapping=tokio::select!{result=Mapping::load(&s)=>result?,_=cancel.changed()=>bail!("Đã dừng đồng bộ")};let mut index=0u32;
     notify(Update::Status("Mở Zalo trên Android và xác nhận yêu cầu đồng bộ nếu điện thoại hỏi.".into()));
     let metadata=receive(&s,&outbound,&mut events,&mut cancel,&mut bridge,"conversation",vec![json!({"partition":"","from":0,"to":9007199254740991u64,"limit":2147483647})],&mut index,&mut mapping,&mut notify).await?;
     let conversations:Vec<Value>=metadata.iter().flat_map(|c|c["conversationsList"].as_array().into_iter().flatten()).cloned().collect();
     let partitions=mapping.add_conversations(&s,&conversations).await?;let skipped=conversations.len().saturating_sub(partitions.len());
     ensure!(!partitions.is_empty()||conversations.is_empty(),"Không ánh xạ được các hội thoại điện thoại sang tài khoản hiện tại");
+    let total_batches=partitions.len().div_ceil(25);
     for (batch,partitions) in partitions.chunks(25).enumerate() {
         if *cancel.borrow(){bail!("Đã dừng đồng bộ; các tin đã nhận được giữ lại");}
-        notify(Update::Status(format!("Đang nhận lịch sử Android • nhóm hội thoại {}",batch+1)));
+        notify(Update::Status(format!("Đang nhận lịch sử Android • đợt {}/{}",batch+1,total_batches)));
         let queries=partitions.iter().map(|partition|json!({"partition":partition,"from":0,"to":9007199254740991u64,"limit":2147483647})).collect();
         receive(&s,&outbound,&mut events,&mut cancel,&mut bridge,"message",queries,&mut index,&mut mapping,&mut notify).await?;
     }
@@ -225,7 +226,8 @@ async fn receive(s:&Session,outbound:&mpsc::UnboundedSender<SocketCommand>,event
                     "upload_batch"=>{
                         let code=data["err"].as_i64().unwrap_or(0);ensure!(code==0,"Điện thoại không tạo được lô lịch sử (mã {code})");
                         let idx=data["idx"].as_u64().ok_or_else(||anyhow!("Lô lịch sử thiếu số thứ tự"))?;
-                        if yes(data.get("isLast")){expected=Some(idx+1);}
+                        ensure!(idx<4096,"Số thứ tự lô lịch sử vượt giới hạn");
+                        if yes(data.get("isLast")){ensure!(expected.is_none_or(|n|n==idx+1),"Số lô lịch sử không nhất quán");expected=Some(idx+1);}
                         if queued.insert(idx) {ensure!(pending.len()<4096,"Quá nhiều lô chờ giải mã");pending.push(data.clone());}
                     },_=>{},
                 }
@@ -233,13 +235,14 @@ async fn receive(s:&Session,outbound:&mpsc::UnboundedSender<SocketCommand>,event
             loop {
                 let next=pending.iter().position(|batch|batch["batchType"].as_u64()==Some(2)||has_metadata||batch["msgUrl"].as_str().is_none_or(str::is_empty));
                 let Some(next)=next else{break;};let batch=pending.remove(next);let idx=batch["idx"].as_u64().unwrap();
+                if *cancel.borrow(){bail!("Đã dừng đồng bộ; các tin đã nhận được giữ lại");}
                 if let Some(url)=batch["msgUrl"].as_str().filter(|url|!url.is_empty()) {
                     let mut response=crate::inline_video::media_response(&s.http,url).await?;let mut bytes=Vec::new();
                     ensure!(response.content_length().unwrap_or(0)<=32*1024*1024,"Lô lịch sử quá lớn");
                     while let Some(chunk)=response.chunk().await?{ensure!(bytes.len()+chunk.len()<=32*1024*1024,"Lô lịch sử quá lớn");bytes.extend_from_slice(&chunk);}
                     let decoded=bridge.request(json!({"op":"decode","syncId":sync_id,"kind":kind,"batchType":batch["batchType"],"bytes":B64.encode(&bytes)})).await?;
                     if batch["batchType"].as_u64()==Some(2){has_metadata=true;}
-                    let batch_chunks=decoded["chunks"].as_array().cloned().unwrap_or_default();
+                    let batch_chunks=decoded["chunks"].as_array().cloned().ok_or_else(||anyhow!("Dữ liệu giải mã không hợp lệ"))?;
                     if kind=="conversation" {chunks.extend(batch_chunks);} else {
                         let changed=mapping.import(s,&batch_chunks).await?;message_count+=changed.iter().map(|t|t.messages.len()).sum::<usize>();
                         if !changed.is_empty(){notify(Update::Threads(changed));}

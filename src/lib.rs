@@ -34,3 +34,5 @@ pub mod clipboard;
 pub mod nicknames;
 
 pub mod attachment_events;
+pub mod document_preview;
+pub mod mute;

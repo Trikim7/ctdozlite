@@ -2,7 +2,14 @@
 
 Bản fork của [ctdoteam1110/ctdozlite](https://github.com/ctdoteam1110/ctdozlite), một Zalo client không chính thức viết bằng Rust với GUI và TUI. Giữ nguyên giấy phép MIT / Apache-2.0 và ghi nhận tác giả gốc.
 
-**Phiên bản mã nguồn của fork: 0.2.0.** Các bản EXE/DEB/DMG từ repository gốc không chứa những sửa đổi dưới đây. Không dùng chúng để đánh giá bản fork.
+**Phiên bản mã nguồn của fork: 0.2.1.** Các bản EXE/DEB/DMG từ repository gốc không chứa những sửa đổi dưới đây. Không dùng chúng để đánh giá bản fork.
+
+## Bản 0.2.1 — tệp, album, thông báo và đọc tài liệu
+
+- Linux chọn nhiều tệp cùng lúc; các lần chọn/dán danh sách tệp/kéo thả nối tiếp hàng chờ (tối đa 20 tệp). Ảnh tĩnh gửi cùng nhóm album, hiển thị lưới ảnh nếu có metadata album.
+- Sync-v2 cho Android kiểm tra số lô, báo tiến độ từng đợt và hỗ trợ dừng khi chuẩn bị. Vẫn cần người dùng cho phép trên điện thoại; dữ liệu đã nhập được giữ lại.
+- Lưu mốc đã đọc theo tài khoản/hội thoại, tránh cộng lại tin trước mốc khi polling. Trạng thái tắt thông báo được lấy định kỳ 30 giây và cập nhật máy chủ khi bấm menu hội thoại.
+- Nút **Xem trước** trên thẻ tệp PDF, DOC/DOCX, XLS/XLSX/XLSM, Markdown và TXT (thêm CSV/TSV). Hiển thị văn bản hoặc bảng giới hạn, không phải bộ dựng tài liệu đầy đủ; PDF scan không OCR. Chỉ tải khi mở, tối đa 10 MiB, một tác vụ, tối đa 24.000 ký tự. Python 3 đọc OOXML không chạy macro; cần `poppler-utils` cho PDF và `catdoc` cho DOC/XLS cũ (có thể dùng `antiword` cho DOC).
 
 ## Bản 0.2.0 — tối ưu lịch sử và giao diện
 
